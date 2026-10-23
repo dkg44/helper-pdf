@@ -283,19 +283,44 @@ export const loadScannerFolders = async (): Promise<ScannedFolder[]> => {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY_FOLDERS);
     if (!raw) {
-      // Default initial folders
+      // By default only one folder
       const defaultFolders: ScannedFolder[] = [
-        { id: 'work', name: 'Work', createdAt: Date.now() },
-        { id: 'receipts', name: 'Receipts', createdAt: Date.now() },
-        { id: 'personal', name: 'Personal', createdAt: Date.now() },
+        { id: 'default', name: 'All Scans', createdAt: Date.now() },
       ];
       await AsyncStorage.setItem(STORAGE_KEY_FOLDERS, JSON.stringify(defaultFolders));
       return defaultFolders;
     }
     return JSON.parse(raw);
   } catch {
-    return [];
+    return [{ id: 'default', name: 'All Scans', createdAt: Date.now() }];
   }
+};
+
+export const clearFolderDocs = async (folderId: string | null): Promise<void> => {
+  const existing = await loadSavedScanDocs();
+  const toDelete = existing.filter((d) => (folderId === null ? true : d.folderId === folderId));
+  for (const doc of toDelete) {
+    if (doc.pdfUri) {
+      try {
+        await FileSystem.deleteAsync(doc.pdfUri, { idempotent: true });
+      } catch {}
+    }
+  }
+  const remaining = existing.filter((d) => (folderId === null ? false : d.folderId !== folderId));
+  await saveScanDocs(remaining);
+};
+
+export const createBlankScanPage = async (): Promise<ScannedPage> => {
+  const html = `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#ffffff;width:100vw;height:100vh;"></body></html>`;
+  const { uri } = await Print.printToFileAsync({ html });
+  return {
+    id: 'scan_' + Date.now(),
+    uri,
+    originalUri: uri,
+    rotation: 0,
+    filter: 'orig',
+    crop: { ...NO_CROP },
+  };
 };
 
 export const saveScannerFolders = async (folders: ScannedFolder[]): Promise<void> => {

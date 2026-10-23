@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import {
   Modal,
   Platform,
   PanResponder,
+  SafeAreaView,
 } from 'react-native';
 import {
   Camera,
@@ -43,9 +44,20 @@ import {
   Move,
   FolderPlus,
   SlidersHorizontal,
+  Search,
+  LayoutGrid,
+  List,
+  ArrowUpDown,
+  Upload,
+  File,
+  X,
 } from 'lucide-react-native';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
+import { WebView } from 'react-native-webview';
+
 import {
   ScannedPage,
   ScanFilterType,
@@ -66,11 +78,16 @@ import {
   deleteSavedScanDoc,
   renameSavedScanDoc,
   moveSavedScanDoc,
+  clearFolderDocs,
+  createBlankScanPage,
+  detectEarlyCrop,
 } from '../services/scannerService';
 
-const { width: SCREEN_W } = Dimensions.get('window');
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 type StudioStage = 'folder_view' | 'border_adjust' | 'filter_enhance' | 'doc_detail';
+type ViewMode = 'grid' | 'list';
+type SortMode = 'date_desc' | 'date_asc' | 'name_asc';
 
 interface ScannerStudioProps {
   primaryColor: string;
@@ -84,10 +101,19 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   isDark,
   onOpenPdf,
 }) => {
-  // Navigation stage: 'folder_view' -> 'border_adjust' -> 'filter_enhance' -> 'doc_detail'
+  // Navigation stage: 'folder_view' -> full-screen editor ('border_adjust' -> 'filter_enhance' -> 'doc_detail')
   const [stage, setStage] = useState<StudioStage>('folder_view');
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [sortMode, setSortMode] = useState<SortMode>('date_desc');
 
-  // Folders & Saved Documents state
+  // Search state
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Top 3-dots vertical menu modal
+  const [showTopMenu, setShowTopMenu] = useState(false);
+
+  // Folders & Saved Documents
   const [folders, setFolders] = useState<ScannedFolder[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null); // null = All
   const [savedDocs, setSavedDocs] = useState<SavedScanDoc[]>([]);
@@ -105,7 +131,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   // Active finished document for 'doc_detail'
   const [currentDoc, setCurrentDoc] = useState<SavedScanDoc | null>(null);
 
-  // 3-dots menus & modals
+  // 3-dots menus & modals for documents
   const [activeMenuDoc, setActiveMenuDoc] = useState<SavedScanDoc | null>(null);
   const [showDocMenuModal, setShowDocMenuModal] = useState(false);
   const [showMoveModal, setShowMoveModal] = useState(false);
@@ -113,8 +139,8 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   const [renameText, setRenameText] = useState('');
   const [showDetailDotsMenu, setShowDetailDotsMenu] = useState(false);
 
-  // Image Frame layout measurements for corner dragging
-  const [frameLayout, setFrameLayout] = useState({ width: 300, height: 380, x: 0, y: 0 });
+  // Layout size for draggable crop canvas
+  const [cropLayout, setCropLayout] = useState({ width: SCREEN_W - 32, height: SCREEN_H * 0.58 });
 
   const bg = isDark ? '#0b1120' : '#f8fafc';
   const cardBg = isDark ? 'rgba(255,255,255,0.04)' : '#ffffff';
@@ -136,11 +162,119 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
 
   const selectedPage = pages[selectedIdx];
 
-  // Filtered documents by active folder
-  const displayedDocs = savedDocs.filter((d) => {
-    if (selectedFolderId === null) return true;
-    return d.folderId === selectedFolderId;
-  });
+  // Filtered & sorted documents
+  const displayedDocs = useMemo(() => {
+    let result = savedDocs.filter((d) => {
+      const matchesFolder = selectedFolderId === null || d.folderId === selectedFolderId;
+      const matchesSearch = !searchQuery.trim() || d.title.toLowerCase().includes(searchQuery.toLowerCase());
+      return matchesFolder && matchesSearch;
+    });
+
+    if (sortMode === 'date_desc') {
+      result.sort((a, b) => b.createdAt - a.createdAt);
+    } else if (sortMode === 'date_asc') {
+      result.sort((a, b) => a.createdAt - b.createdAt);
+    } else if (sortMode === 'name_asc') {
+      result.sort((a, b) => a.title.localeCompare(b.title));
+    }
+
+    return result;
+  }, [savedDocs, selectedFolderId, searchQuery, sortMode]);
+
+  // ── Drag & Resize Crop Logic with PanResponder ──────────────
+  const cropRef = useRef<PageCrop>(selectedPage?.crop || DEFAULT_AUTO_CROP);
+  useEffect(() => {
+    if (selectedPage?.crop) {
+      cropRef.current = selectedPage.crop;
+    }
+  }, [selectedPage?.crop]);
+
+  const updateCrop = (newCrop: PageCrop) => {
+    cropRef.current = newCrop;
+    setPages((prev) =>
+      prev.map((p, i) => (i === selectedIdx ? { ...p, crop: newCrop } : p))
+    );
+  };
+
+  // Draggable PanResponder for Top-Left Corner
+  const panTL = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderMove: (_, gestureState) => {
+        const W = cropLayout.width || 300;
+        const H = cropLayout.height || 400;
+        const dXPct = (gestureState.dx / W) * 100;
+        const dYPct = (gestureState.dy / H) * 100;
+
+        const current = cropRef.current;
+        const newLeft = Math.max(0, Math.min(42, current.leftPercent + dXPct * 0.08));
+        const newTop = Math.max(0, Math.min(42, current.topPercent + dYPct * 0.08));
+
+        updateCrop({ ...current, leftPercent: newLeft, topPercent: newTop });
+      },
+    })
+  ).current;
+
+  // Draggable PanResponder for Top-Right Corner
+  const panTR = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderMove: (_, gestureState) => {
+        const W = cropLayout.width || 300;
+        const H = cropLayout.height || 400;
+        const dXPct = (gestureState.dx / W) * 100;
+        const dYPct = (gestureState.dy / H) * 100;
+
+        const current = cropRef.current;
+        const newRight = Math.max(0, Math.min(42, current.rightPercent - dXPct * 0.08));
+        const newTop = Math.max(0, Math.min(42, current.topPercent + dYPct * 0.08));
+
+        updateCrop({ ...current, rightPercent: newRight, topPercent: newTop });
+      },
+    })
+  ).current;
+
+  // Draggable PanResponder for Bottom-Left Corner
+  const panBL = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderMove: (_, gestureState) => {
+        const W = cropLayout.width || 300;
+        const H = cropLayout.height || 400;
+        const dXPct = (gestureState.dx / W) * 100;
+        const dYPct = (gestureState.dy / H) * 100;
+
+        const current = cropRef.current;
+        const newLeft = Math.max(0, Math.min(42, current.leftPercent + dXPct * 0.08));
+        const newBottom = Math.max(0, Math.min(42, current.bottomPercent - dYPct * 0.08));
+
+        updateCrop({ ...current, leftPercent: newLeft, bottomPercent: newBottom });
+      },
+    })
+  ).current;
+
+  // Draggable PanResponder for Bottom-Right Corner
+  const panBR = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderMove: (_, gestureState) => {
+        const W = cropLayout.width || 300;
+        const H = cropLayout.height || 400;
+        const dXPct = (gestureState.dx / W) * 100;
+        const dYPct = (gestureState.dy / H) * 100;
+
+        const current = cropRef.current;
+        const newRight = Math.max(0, Math.min(42, current.rightPercent - dXPct * 0.08));
+        const newBottom = Math.max(0, Math.min(42, current.bottomPercent - dYPct * 0.08));
+
+        updateCrop({ ...current, rightPercent: newRight, bottomPercent: newBottom });
+      },
+    })
+  ).current;
 
   // ── Capture & Batch Scanning ────────────────────────────────
   const handleStartCamera = async () => {
@@ -150,7 +284,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
         setPages([page]);
         setSelectedIdx(0);
         const now = new Date();
-        const autoName = `Doc_${now.getMonth() + 1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
+        const autoName = `Scan_${now.getMonth() + 1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
         setDocTitle(autoName);
         setStage('border_adjust');
 
@@ -166,12 +300,12 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   const promptForNextBatchPage = (existingPages: ScannedPage[]) => {
     setTimeout(() => {
       Alert.alert(
-        'Batch Mode Active',
-        `Page ${existingPages.length} captured! Take another page or review border adjustments?`,
+        'Batch Scan Mode',
+        `Page ${existingPages.length} captured! Scan another page or adjust borders?`,
         [
-          { text: 'Review Borders', style: 'cancel' },
+          { text: 'Adjust Borders', style: 'cancel' },
           {
-            text: '+ Next Page',
+            text: '+ Scan Next Page',
             onPress: async () => {
               const nextPage = await capturePageWithCamera(currentFilter);
               if (nextPage) {
@@ -194,7 +328,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
         setPages(imported);
         setSelectedIdx(0);
         const now = new Date();
-        const autoName = `Document_${now.getMonth() + 1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
+        const autoName = `Scan_${now.getMonth() + 1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
         setDocTitle(autoName);
         setStage('border_adjust');
       }
@@ -203,28 +337,74 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     }
   };
 
-  // ── Draggable Corner Adjustments ────────────────────────────
-  const updateCropPercent = (edge: 'top' | 'bottom' | 'left' | 'right', delta: number) => {
-    if (!selectedPage) return;
-    const current = selectedPage.crop;
-    const key = `${edge}Percent` as keyof PageCrop;
-    const newVal = Math.max(0, Math.min(38, current[key] + delta));
-    const updatedCrop = { ...current, [key]: newVal };
-    setPages((prev) =>
-      prev.map((p, i) => (i === selectedIdx ? { ...p, crop: updatedCrop } : p))
+  const handleImportPdfDocument = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+        copyToCacheDirectory: true,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const file = result.assets[0];
+        const newDoc: SavedScanDoc = {
+          id: `doc_${Date.now()}`,
+          title: file.name.replace(/\.pdf$/i, ''),
+          pdfUri: file.uri,
+          pageCount: 1,
+          thumbnailUri: '',
+          folderId: selectedFolderId,
+          createdAt: Date.now(),
+          fileSize: file.size,
+        };
+        await addSavedScanDoc(newDoc);
+        await loadFoldersAndDocs();
+        Alert.alert('PDF Imported', `Added "${file.name}" to your scanner library.`);
+      }
+    } catch (e: any) {
+      Alert.alert('Import Failed', e?.message || 'Could not import PDF.');
+    }
+  };
+
+  const handleCreateBlankDocument = async () => {
+    try {
+      const blankPage = await createBlankScanPage();
+      setPages([blankPage]);
+      setSelectedIdx(0);
+      setDocTitle(`Blank_${Date.now()}`);
+      setStage('filter_enhance');
+    } catch (e: any) {
+      Alert.alert('Error', 'Could not create blank document.');
+    }
+  };
+
+  const handleClearCurrentFolder = async () => {
+    const folderName = folders.find((f) => f.id === selectedFolderId)?.name || 'this folder';
+    Alert.alert(
+      'Clear Folder',
+      `Are you sure you want to delete all scanned documents inside ${folderName}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear All',
+          style: 'destructive',
+          onPress: async () => {
+            await clearFolderDocs(selectedFolderId);
+            await loadFoldersAndDocs();
+          },
+        },
+      ]
     );
   };
 
-  const setCropPreset = (preset: 'auto' | 'full' | 'deep') => {
+  // ── Step 1: Border Adjust Actions ───────────────────────────
+  const handleAutoDetectCorner = () => {
     if (!selectedPage) return;
-    let newCrop: PageCrop;
-    if (preset === 'auto') newCrop = { ...DEFAULT_AUTO_CROP };
-    else if (preset === 'deep') newCrop = { topPercent: 8, bottomPercent: 8, leftPercent: 8, rightPercent: 8 };
-    else newCrop = { ...NO_CROP };
+    const early = detectEarlyCrop(selectedPage.width, selectedPage.height);
+    updateCrop(early);
+  };
 
-    setPages((prev) =>
-      prev.map((p, i) => (i === selectedIdx ? { ...p, crop: newCrop } : p))
-    );
+  const handleFullPhotoCrop = () => {
+    updateCrop({ ...NO_CROP });
   };
 
   const handleRotateCurrent = () => {
@@ -234,12 +414,11 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     );
   };
 
-  // ── STEP 1 -> STEP 2 (Border Adjustment -> Filter) ──────────
+  // Proceed to Step 2 (Filters)
   const handleProceedToFilters = async () => {
     if (!pages.length) return;
     setIsProcessing(true);
     try {
-      // Apply crop to current or all pages
       const croppedPages = await Promise.all(pages.map((p) => applyCropToPage(p)));
       setPages(croppedPages);
       setStage('filter_enhance');
@@ -250,8 +429,8 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     }
   };
 
-  // ── STEP 2 -> STEP 3 (Filter -> Document Detail & PDF) ──────
-  const handleConfirmAndCreateDoc = async () => {
+  // ── Step 2: Filters -> Compile to PDF ────────────────────────
+  const handleConfirmAndMakePdf = async () => {
     if (!pages.length) return;
     setIsProcessing(true);
     try {
@@ -278,21 +457,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     }
   };
 
-  // ── Folder Actions ──────────────────────────────────────────
-  const handleCreateFolder = async () => {
-    if (!newFolderName.trim()) return;
-    try {
-      const created = await createScannerFolder(newFolderName.trim());
-      setFolders((prev) => [...prev, created]);
-      setSelectedFolderId(created.id);
-      setNewFolderName('');
-      setShowNewFolderModal(false);
-    } catch (e: any) {
-      Alert.alert('Error', 'Could not create folder.');
-    }
-  };
-
-  // ── Document 3-Dots Actions ─────────────────────────────────
+  // ── Document Operations (Share, Rename, Delete, Move) ───────
   const handleShareDoc = async (doc: SavedScanDoc) => {
     try {
       if (await Sharing.isAvailableAsync()) {
@@ -345,877 +510,564 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     setShowDocMenuModal(false);
   };
 
-  // ═════════════════════════════════════════════════════════════
-  // STAGE 1: FOLDER VIEW & SCANNER HOME
-  // ═════════════════════════════════════════════════════════════
-  if (stage === 'folder_view') {
-    return (
-      <View style={[styles.container, { backgroundColor: bg }]}>
-        {/* Top Header */}
-        <View style={[styles.folderHeader, { backgroundColor: cardBg, borderColor: border }]}>
-          <View style={styles.headerLeft}>
-            <View style={[styles.headerIconBox, { backgroundColor: primaryColor + '18' }]}>
-              <ScanLine size={20} color={primaryColor} />
-            </View>
-            <View>
-              <Text style={[styles.headerTitle, { color: textColor }]}>Clear Document Scanner</Text>
-              <Text style={[styles.headerSub, { color: mutedColor }]}>
-                {displayedDocs.length} {displayedDocs.length === 1 ? 'Document' : 'Documents'} • Cloud & Local
-              </Text>
-            </View>
-          </View>
+  const handleCreateFolder = async () => {
+    if (!newFolderName.trim()) return;
+    try {
+      const created = await createScannerFolder(newFolderName.trim());
+      setFolders((prev) => [...prev, created]);
+      setSelectedFolderId(created.id);
+      setNewFolderName('');
+      setShowNewFolderModal(false);
+    } catch (e: any) {
+      Alert.alert('Error', 'Could not create folder.');
+    }
+  };
 
-          {/* Batch Mode Toggle */}
-          <TouchableOpacity
-            onPress={() => setIsBatchMode(!isBatchMode)}
-            style={[
-              styles.batchToggle,
-              { backgroundColor: isBatchMode ? primaryColor : (isDark ? '#1e293b' : '#e2e8f0') },
-            ]}
-            activeOpacity={0.8}
-          >
-            <Layers size={12} color={isBatchMode ? '#ffffff' : mutedColor} />
-            <Text style={[styles.batchToggleText, { color: isBatchMode ? '#ffffff' : mutedColor }]}>
-              {isBatchMode ? 'Batch ON' : 'Single'}
+  // ── HTML Preview Generator with Real Filters for WebView ────
+  const filterPreviewHtml = useMemo(() => {
+    if (!selectedPage) return '';
+    let filterCss = 'filter: none;';
+    const activeFilter = selectedPage.filter || currentFilter;
+
+    if (activeFilter === 'doc') {
+      // Clear Scan / Helper: high contrast, bright white paper, dark crisp ink
+      filterCss = 'filter: contrast(180%) brightness(115%) grayscale(100%);';
+    } else if (activeFilter === 'color') {
+      // Magic Color: enhanced saturation & contrast
+      filterCss = 'filter: contrast(135%) brightness(108%) saturate(135%);';
+    } else if (activeFilter === 'bw') {
+      // B & W: photocopy monochrome
+      filterCss = 'filter: grayscale(100%) contrast(240%);';
+    }
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body {
+            width: 100vw;
+            height: 100vh;
+            background: ${isDark ? '#0b1120' : '#f8fafc'};
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+          }
+          img {
+            max-width: 95%;
+            max-height: 95%;
+            object-fit: contain;
+            transform: rotate(${selectedPage.rotation}deg);
+            ${filterCss}
+            border-radius: 8px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+          }
+        </style>
+      </head>
+      <body>
+        <img src="${selectedPage.uri}" />
+      </body>
+      </html>
+    `;
+  }, [selectedPage, currentFilter, isDark]);
+
+  // ═════════════════════════════════════════════════════════════
+  // MAIN SCREEN: SCANNER HOME (FOLDER LIST, SEARCH, TOP 3-DOTS)
+  // ═════════════════════════════════════════════════════════════
+  return (
+    <View style={[styles.container, { backgroundColor: bg }]}>
+      {/* ── Top Header with Title, Search, and 3-Vertical-Dots Menu ── */}
+      <View style={[styles.mainTopHeader, { backgroundColor: cardBg, borderColor: border }]}>
+        <View style={styles.titleIconRow}>
+          <View style={[styles.headerIconBox, { backgroundColor: primaryColor + '18' }]}>
+            <ScanLine size={20} color={primaryColor} />
+          </View>
+          <View>
+            <Text style={[styles.headerTitle, { color: textColor }]}>Clear Scanner</Text>
+            <Text style={[styles.headerSub, { color: mutedColor }]}>
+              {displayedDocs.length} {displayedDocs.length === 1 ? 'Scan' : 'Scans'}
             </Text>
+          </View>
+        </View>
+
+        <View style={styles.topRightActions}>
+          {/* Search Button (🔍) */}
+          <TouchableOpacity
+            onPress={() => setShowSearch(!showSearch)}
+            style={styles.iconCircleBtn}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Search size={20} color={showSearch ? primaryColor : textColor} />
+          </TouchableOpacity>
+
+          {/* 3 Vertical Dots (⋮) Menu Button */}
+          <TouchableOpacity
+            onPress={() => setShowTopMenu(true)}
+            style={styles.iconCircleBtn}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <MoreVertical size={20} color={textColor} />
           </TouchableOpacity>
         </View>
+      </View>
 
-        {/* Folder Tabs Horizontal Scroll */}
-        <View style={[styles.folderBarWrap, { borderColor: border }]}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderTabs}>
-            <TouchableOpacity
-              onPress={() => setSelectedFolderId(null)}
+      {/* Expandable Search Input */}
+      {showSearch && (
+        <View style={[styles.searchBarWrap, { backgroundColor: cardBg, borderColor: border }]}>
+          <Search size={16} color={mutedColor} style={{ marginLeft: 8 }} />
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search scans by document title..."
+            placeholderTextColor={mutedColor}
+            style={[styles.searchInput, { color: textColor }]}
+            autoFocus
+          />
+          {searchQuery ? (
+            <TouchableOpacity onPress={() => setSearchQuery('')} style={{ padding: 6 }}>
+              <X size={15} color={mutedColor} />
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      )}
+
+      {/* Folders Bar */}
+      <View style={[styles.folderBarWrap, { borderColor: border }]}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderTabs}>
+          <TouchableOpacity
+            onPress={() => setSelectedFolderId(null)}
+            style={[
+              styles.folderChip,
+              {
+                backgroundColor: selectedFolderId === null ? primaryColor : cardBg,
+                borderColor: selectedFolderId === null ? primaryColor : border,
+              },
+            ]}
+          >
+            <Folder size={13} color={selectedFolderId === null ? '#ffffff' : textColor} />
+            <Text
               style={[
-                styles.folderChip,
-                {
-                  backgroundColor: selectedFolderId === null ? primaryColor : cardBg,
-                  borderColor: selectedFolderId === null ? primaryColor : border,
-                },
+                styles.folderChipText,
+                { color: selectedFolderId === null ? '#ffffff' : textColor },
               ]}
             >
-              <Folder size={14} color={selectedFolderId === null ? '#ffffff' : textColor} />
-              <Text
+              All Scans
+            </Text>
+          </TouchableOpacity>
+
+          {folders.map((f) => {
+            const isSelected = selectedFolderId === f.id;
+            return (
+              <TouchableOpacity
+                key={f.id}
+                onPress={() => setSelectedFolderId(f.id)}
                 style={[
-                  styles.folderChipText,
-                  { color: selectedFolderId === null ? '#ffffff' : textColor },
+                  styles.folderChip,
+                  {
+                    backgroundColor: isSelected ? primaryColor : cardBg,
+                    borderColor: isSelected ? primaryColor : border,
+                  },
                 ]}
               >
-                All Documents
-              </Text>
-            </TouchableOpacity>
-
-            {folders.map((f) => {
-              const isSelected = selectedFolderId === f.id;
-              return (
-                <TouchableOpacity
-                  key={f.id}
-                  onPress={() => setSelectedFolderId(f.id)}
+                <Folder size={13} color={isSelected ? '#ffffff' : textColor} />
+                <Text
                   style={[
-                    styles.folderChip,
-                    {
-                      backgroundColor: isSelected ? primaryColor : cardBg,
-                      borderColor: isSelected ? primaryColor : border,
-                    },
+                    styles.folderChipText,
+                    { color: isSelected ? '#ffffff' : textColor },
                   ]}
                 >
-                  <Folder size={14} color={isSelected ? '#ffffff' : textColor} />
-                  <Text
-                    style={[
-                      styles.folderChipText,
-                      { color: isSelected ? '#ffffff' : textColor },
-                    ]}
-                  >
-                    {f.name}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
+                  {f.name}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
 
-            {/* + New Folder Chip */}
-            <TouchableOpacity
-              onPress={() => setShowNewFolderModal(true)}
-              style={[styles.folderChip, styles.newFolderChip, { borderColor: primaryColor }]}
-            >
-              <FolderPlus size={14} color={primaryColor} />
-              <Text style={[styles.folderChipText, { color: primaryColor, fontWeight: '700' }]}>
-                + Folder
-              </Text>
-            </TouchableOpacity>
-          </ScrollView>
-        </View>
+          {/* + New Folder Chip */}
+          <TouchableOpacity
+            onPress={() => setShowNewFolderModal(true)}
+            style={[styles.folderChip, styles.newFolderChip, { borderColor: primaryColor }]}
+          >
+            <FolderPlus size={13} color={primaryColor} />
+            <Text style={[styles.folderChipText, { color: primaryColor, fontWeight: '700' }]}>
+              + Folder
+            </Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
 
-        {/* Documents List */}
-        <ScrollView contentContainerStyle={styles.docListScroll} showsVerticalScrollIndicator={false}>
-          {displayedDocs.length === 0 ? (
-            <View style={[styles.emptyStudioBox, { borderColor: border }]}>
-              <View style={[styles.emptyIconCircle, { backgroundColor: primaryColor + '14' }]}>
-                <Camera size={36} color={primaryColor} />
-              </View>
-              <Text style={[styles.emptyTitle, { color: textColor }]}>No Scans in this Folder</Text>
-              <Text style={[styles.emptyDesc, { color: mutedColor }]}>
-                Capture documents with the camera or import multi-page photos. Auto-border detection, ink filters, and multi-folder organization.
-              </Text>
+      {/* ── Document List / Grid View ── */}
+      <ScrollView contentContainerStyle={styles.docListScroll} showsVerticalScrollIndicator={false}>
+        {displayedDocs.length === 0 ? (
+          <View style={[styles.emptyStudioBox, { borderColor: border }]}>
+            <View style={[styles.emptyIconCircle, { backgroundColor: primaryColor + '14' }]}>
+              <Camera size={36} color={primaryColor} />
             </View>
-          ) : (
-            displayedDocs.map((doc) => (
+            <Text style={[styles.emptyTitle, { color: textColor }]}>No Scans Here Yet</Text>
+            <Text style={[styles.emptyDesc, { color: mutedColor }]}>
+              Tap the camera button below to scan documents, adjust borders with draggable corners, and create clear PDFs.
+            </Text>
+          </View>
+        ) : viewMode === 'grid' ? (
+          // Grid View (2-Column Cards)
+          <View style={styles.gridContainer}>
+            {displayedDocs.map((doc) => (
               <View
                 key={doc.id}
-                style={[styles.docCard, { backgroundColor: cardBg, borderColor: border }]}
+                style={[styles.gridCard, { backgroundColor: cardBg, borderColor: border }]}
               >
-                {/* Thumbnail */}
                 <TouchableOpacity
                   onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
-                  style={styles.docThumbBox}
+                  style={styles.gridThumbBox}
                   activeOpacity={0.8}
                 >
                   {doc.thumbnailUri ? (
-                    <Image source={{ uri: doc.thumbnailUri }} style={styles.docThumbImg} resizeMode="cover" />
+                    <Image source={{ uri: doc.thumbnailUri }} style={styles.gridThumbImg} resizeMode="cover" />
                   ) : (
-                    <FileText size={22} color="#dc2626" />
+                    <FileText size={32} color="#dc2626" />
                   )}
                   <View style={styles.pdfBadge}>
                     <Text style={styles.pdfBadgeText}>PDF</Text>
                   </View>
                 </TouchableOpacity>
 
-                {/* Info */}
-                <TouchableOpacity
-                  onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
-                  style={{ flex: 1, paddingVertical: 4 }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[styles.docCardTitle, { color: textColor }]} numberOfLines={1}>
-                    {doc.title}
-                  </Text>
-                  <Text style={[styles.docCardSub, { color: mutedColor }]}>
-                    {doc.pageCount} {doc.pageCount === 1 ? 'Page' : 'Pages'} • {new Date(doc.createdAt).toLocaleDateString()}
-                    {doc.fileSize ? ` • ${(doc.fileSize / 1024).toFixed(0)} KB` : ''}
-                  </Text>
-                </TouchableOpacity>
-
-                {/* 3-Dots Button */}
-                <TouchableOpacity
-                  onPress={() => {
-                    setActiveMenuDoc(doc);
-                    setShowDocMenuModal(true);
-                  }}
-                  style={styles.threeDotBtn}
-                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                >
-                  <MoreVertical size={18} color={mutedColor} />
-                </TouchableOpacity>
-              </View>
-            ))
-          )}
-        </ScrollView>
-
-        {/* Floating Scan Action Bar at Bottom */}
-        <View style={[styles.floatingBottomBar, { backgroundColor: bg }]}>
-          <TouchableOpacity
-            onPress={handleStartCamera}
-            style={[styles.mainScanBtn, { backgroundColor: primaryColor }]}
-            activeOpacity={0.85}
-          >
-            <Camera size={20} color="#ffffff" />
-            <Text style={styles.mainScanBtnText}>
-              {isBatchMode ? 'Batch Camera Scan' : 'Scan Page'}
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={handleImportGallery}
-            style={[
-              styles.galleryBtn,
-              { backgroundColor: cardBg, borderColor: border, borderWidth: 1 },
-            ]}
-            activeOpacity={0.85}
-          >
-            <FolderOpen size={18} color={textColor} />
-            <Text style={[styles.galleryBtnText, { color: textColor }]}>Gallery</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* ── Modal: 3-Dots Menu (Preview, Share, Rename, Move, Delete) ── */}
-        <Modal
-          visible={showDocMenuModal}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowDocMenuModal(false)}
-        >
-          <TouchableOpacity
-            style={styles.modalBackdrop}
-            activeOpacity={1}
-            onPress={() => setShowDocMenuModal(false)}
-          >
-            <View style={[styles.actionSheet, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
-              <View style={styles.sheetHandle} />
-              <Text style={[styles.sheetTitle, { color: textColor }]}>
-                {activeMenuDoc?.title}
-              </Text>
-
-              <TouchableOpacity
-                style={styles.sheetOption}
-                onPress={() => {
-                  if (activeMenuDoc) {
-                    setShowDocMenuModal(false);
-                    onOpenPdf(activeMenuDoc.pdfUri, `${activeMenuDoc.title}.pdf`);
-                  }
-                }}
-              >
-                <Eye size={18} color={primaryColor} />
-                <Text style={[styles.sheetOptionText, { color: textColor }]}>Preview / Open PDF</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.sheetOption}
-                onPress={() => {
-                  if (activeMenuDoc) {
-                    setShowDocMenuModal(false);
-                    handleShareDoc(activeMenuDoc);
-                  }
-                }}
-              >
-                <Share2 size={18} color="#059669" />
-                <Text style={[styles.sheetOptionText, { color: textColor }]}>Share File</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.sheetOption}
-                onPress={() => {
-                  if (activeMenuDoc) {
-                    setRenameText(activeMenuDoc.title);
-                    setShowRenameModal(true);
-                  }
-                }}
-              >
-                <Edit3 size={18} color="#2563eb" />
-                <Text style={[styles.sheetOptionText, { color: textColor }]}>Rename</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.sheetOption}
-                onPress={() => setShowMoveModal(true)}
-              >
-                <Move size={18} color="#d97706" />
-                <Text style={[styles.sheetOptionText, { color: textColor }]}>Move to Folder</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.sheetOption, { borderTopWidth: 1, borderTopColor: border, marginTop: 4 }]}
-                onPress={() => {
-                  if (activeMenuDoc) {
-                    handleDeleteDoc(activeMenuDoc.id);
-                  }
-                }}
-              >
-                <Trash2 size={18} color="#ef4444" />
-                <Text style={[styles.sheetOptionText, { color: '#ef4444' }]}>Delete</Text>
-              </TouchableOpacity>
-            </View>
-          </TouchableOpacity>
-        </Modal>
-
-        {/* ── Modal: Create New Folder ── */}
-        <Modal
-          visible={showNewFolderModal}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowNewFolderModal(false)}
-        >
-          <View style={styles.modalBackdrop}>
-            <View style={[styles.dialogBox, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
-              <Text style={[styles.dialogTitle, { color: textColor }]}>Create New Folder</Text>
-              <TextInput
-                value={newFolderName}
-                onChangeText={setNewFolderName}
-                placeholder="Folder name (e.g. Work, Taxes)..."
-                placeholderTextColor={mutedColor}
-                style={[
-                  styles.dialogInput,
-                  { color: textColor, borderColor: border, backgroundColor: isDark ? '#0f172a' : '#f8fafc' },
-                ]}
-                autoFocus
-              />
-              <View style={styles.dialogButtons}>
-                <TouchableOpacity
-                  onPress={() => setShowNewFolderModal(false)}
-                  style={[styles.dialogBtn, { borderColor: border, borderWidth: 1 }]}
-                >
-                  <Text style={{ color: mutedColor, fontWeight: '600' }}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={handleCreateFolder}
-                  style={[styles.dialogBtn, { backgroundColor: primaryColor }]}
-                >
-                  <Text style={{ color: '#ffffff', fontWeight: '700' }}>Create</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </Modal>
-
-        {/* ── Modal: Rename Document ── */}
-        <Modal
-          visible={showRenameModal}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowRenameModal(false)}
-        >
-          <View style={styles.modalBackdrop}>
-            <View style={[styles.dialogBox, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
-              <Text style={[styles.dialogTitle, { color: textColor }]}>Rename PDF Document</Text>
-              <TextInput
-                value={renameText}
-                onChangeText={setRenameText}
-                placeholder="Document title..."
-                placeholderTextColor={mutedColor}
-                style={[
-                  styles.dialogInput,
-                  { color: textColor, borderColor: border, backgroundColor: isDark ? '#0f172a' : '#f8fafc' },
-                ]}
-                autoFocus
-              />
-              <View style={styles.dialogButtons}>
-                <TouchableOpacity
-                  onPress={() => setShowRenameModal(false)}
-                  style={[styles.dialogBtn, { borderColor: border, borderWidth: 1 }]}
-                >
-                  <Text style={{ color: mutedColor, fontWeight: '600' }}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={handleExecuteRename}
-                  style={[styles.dialogBtn, { backgroundColor: primaryColor }]}
-                >
-                  <Text style={{ color: '#ffffff', fontWeight: '700' }}>Save</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </Modal>
-
-        {/* ── Modal: Move Document to Folder ── */}
-        <Modal
-          visible={showMoveModal}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowMoveModal(false)}
-        >
-          <View style={styles.modalBackdrop}>
-            <View style={[styles.dialogBox, { backgroundColor: isDark ? '#1e293b' : '#ffffff', maxHeight: 380 }]}>
-              <Text style={[styles.dialogTitle, { color: textColor }]}>Move to Folder</Text>
-              <ScrollView style={{ marginVertical: 12 }}>
-                <TouchableOpacity
-                  style={[
-                    styles.moveFolderOption,
-                    { borderBottomColor: border, borderBottomWidth: 1 },
-                  ]}
-                  onPress={() => handleExecuteMove(null)}
-                >
-                  <Folder size={18} color={primaryColor} />
-                  <Text style={[styles.moveFolderText, { color: textColor }]}>
-                    All Documents (Unfiled)
-                  </Text>
-                </TouchableOpacity>
-                {folders.map((f) => (
+                <View style={styles.gridMetaRow}>
                   <TouchableOpacity
-                    key={f.id}
-                    style={[
-                      styles.moveFolderOption,
-                      { borderBottomColor: border, borderBottomWidth: 1 },
-                    ]}
-                    onPress={() => handleExecuteMove(f.id)}
+                    onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
+                    style={{ flex: 1 }}
                   >
-                    <Folder size={18} color="#059669" />
-                    <Text style={[styles.moveFolderText, { color: textColor }]}>{f.name}</Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-              <TouchableOpacity
-                onPress={() => setShowMoveModal(false)}
-                style={[styles.dialogBtn, { borderColor: border, borderWidth: 1, alignSelf: 'stretch' }]}
-              >
-                <Text style={{ color: mutedColor, fontWeight: '600', textAlign: 'center' }}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
-      </View>
-    );
-  }
-
-  // ═════════════════════════════════════════════════════════════
-  // STAGE 2: BORDER ADJUSTMENT & CORNER RESIZE (STEP 1)
-  // ═════════════════════════════════════════════════════════════
-  if (stage === 'border_adjust') {
-    return (
-      <View style={[styles.container, { backgroundColor: bg }]}>
-        {/* Top Header Bar */}
-        <View style={[styles.stepTopBar, { backgroundColor: cardBg, borderColor: border }]}>
-          <TouchableOpacity
-            onPress={() => setStage('folder_view')}
-            style={styles.backBtn}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <ArrowLeft size={20} color={textColor} />
-          </TouchableOpacity>
-
-          <View style={{ alignItems: 'center' }}>
-            <Text style={[styles.stepTitle, { color: textColor }]}>1. Adjust Borders</Text>
-            <Text style={[styles.stepSub, { color: mutedColor }]}>
-              Page {selectedIdx + 1} of {pages.length} • Drag corners or tap +/-
-            </Text>
-          </View>
-
-          {/* Correct / Checkmark Symbol (✓) */}
-          <TouchableOpacity
-            onPress={handleProceedToFilters}
-            style={[styles.stepCheckBtn, { backgroundColor: primaryColor }]}
-            activeOpacity={0.8}
-            disabled={isProcessing}
-          >
-            {isProcessing ? (
-              <ActivityIndicator size="small" color="#ffffff" />
-            ) : (
-              <Check size={20} color="#ffffff" />
-            )}
-          </TouchableOpacity>
-        </View>
-
-        {/* Main Crop Frame with Interactive Resizable Corners */}
-        <View
-          style={styles.cropCanvasWrap}
-          onLayout={(e) => {
-            const { width, height } = e.nativeEvent.layout;
-            if (width > 0 && height > 0) {
-              setFrameLayout({ width, height, x: 0, y: 0 });
-            }
-          }}
-        >
-          {selectedPage ? (
-            <View style={styles.imageWrap}>
-              <Image
-                source={{ uri: selectedPage.originalUri || selectedPage.uri }}
-                style={[
-                  styles.previewImage,
-                  { transform: [{ rotate: `${selectedPage.rotation}deg` }] },
-                ]}
-                resizeMode="contain"
-              />
-
-              {/* Dynamic Resizable Crop Box */}
-              {selectedPage.crop && (
-                <View
-                  style={[
-                    styles.cropBoxOverlay,
-                    {
-                      top: `${selectedPage.crop.topPercent}%`,
-                      bottom: `${selectedPage.crop.bottomPercent}%`,
-                      left: `${selectedPage.crop.leftPercent}%`,
-                      right: `${selectedPage.crop.rightPercent}%`,
-                      borderColor: '#10b981',
-                    },
-                  ]}
-                >
-                  {/* 4 Draggable Resizable Corner Handles */}
-                  {/* Top-Left Corner */}
-                  <TouchableOpacity
-                    style={[styles.cornerHandle, styles.tlCorner]}
-                    onPress={() => updateCropPercent('top', 2)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={styles.cornerHandleInner} />
+                    <Text style={[styles.gridTitle, { color: textColor }]} numberOfLines={1}>
+                      {doc.title}
+                    </Text>
+                    <Text style={[styles.gridSub, { color: mutedColor }]}>
+                      {doc.pageCount} {doc.pageCount === 1 ? 'Page' : 'Pages'}
+                    </Text>
                   </TouchableOpacity>
 
-                  {/* Top-Right Corner */}
                   <TouchableOpacity
-                    style={[styles.cornerHandle, styles.trCorner]}
-                    onPress={() => updateCropPercent('right', 2)}
-                    activeOpacity={0.7}
+                    onPress={() => {
+                      setActiveMenuDoc(doc);
+                      setShowDocMenuModal(true);
+                    }}
+                    style={styles.cardDotBtn}
                   >
-                    <View style={styles.cornerHandleInner} />
-                  </TouchableOpacity>
-
-                  {/* Bottom-Left Corner */}
-                  <TouchableOpacity
-                    style={[styles.cornerHandle, styles.blCorner]}
-                    onPress={() => updateCropPercent('bottom', 2)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={styles.cornerHandleInner} />
-                  </TouchableOpacity>
-
-                  {/* Bottom-Right Corner */}
-                  <TouchableOpacity
-                    style={[styles.cornerHandle, styles.brCorner]}
-                    onPress={() => updateCropPercent('right', -2)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={styles.cornerHandleInner} />
-                  </TouchableOpacity>
-
-                  {/* Center Grid */}
-                  <View style={styles.gridLineH} />
-                  <View style={styles.gridLineV} />
-                </View>
-              )}
-
-              {/* Rotate and Delete in-frame badges */}
-              <View style={styles.frameActions}>
-                <TouchableOpacity
-                  onPress={handleRotateCurrent}
-                  style={[styles.floatingActionBtn, { backgroundColor: 'rgba(0,0,0,0.65)' }]}
-                >
-                  <RotateCw size={16} color="#ffffff" />
-                </TouchableOpacity>
-              </View>
-            </View>
-          ) : null}
-        </View>
-
-        {/* Page Switcher if Multiple Pages */}
-        {pages.length > 1 && (
-          <View style={[styles.pageNavRow, { backgroundColor: cardBg, borderColor: border }]}>
-            <TouchableOpacity
-              disabled={selectedIdx === 0}
-              onPress={() => setSelectedIdx(Math.max(0, selectedIdx - 1))}
-              style={[styles.pageNavArrow, { opacity: selectedIdx === 0 ? 0.3 : 1 }]}
-            >
-              <ChevronLeft size={20} color={textColor} />
-            </TouchableOpacity>
-            <Text style={[styles.pageNavText, { color: textColor }]}>
-              Page {selectedIdx + 1} of {pages.length}
-            </Text>
-            <TouchableOpacity
-              disabled={selectedIdx === pages.length - 1}
-              onPress={() => setSelectedIdx(Math.min(pages.length - 1, selectedIdx + 1))}
-              style={[styles.pageNavArrow, { opacity: selectedIdx === pages.length - 1 ? 0.3 : 1 }]}
-            >
-              <ChevronRight size={20} color={textColor} />
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* Presets & Fine-Grained Margin Steppers */}
-        <View style={[styles.bottomControlCard, { backgroundColor: cardBg, borderColor: border }]}>
-          {/* Presets */}
-          <View style={styles.cropPresetRow}>
-            <TouchableOpacity
-              onPress={() => setCropPreset('auto')}
-              style={[styles.presetBtn, { backgroundColor: primaryColor + '18', borderColor: primaryColor }]}
-            >
-              <Sparkles size={13} color={primaryColor} />
-              <Text style={[styles.presetBtnText, { color: primaryColor }]}>Auto-Set Crop</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              onPress={() => setCropPreset('deep')}
-              style={[styles.presetBtn, { borderColor: border }]}
-            >
-              <Sliders size={13} color={textColor} />
-              <Text style={[styles.presetBtnText, { color: textColor }]}>Deep Trim</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              onPress={() => setCropPreset('full')}
-              style={[styles.presetBtn, { borderColor: border }]}
-            >
-              <Maximize2 size={13} color={textColor} />
-              <Text style={[styles.presetBtnText, { color: textColor }]}>Full Photo</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Stepper buttons for 4 edges */}
-          <View style={styles.stepperEdgeRow}>
-            {(['top', 'bottom', 'left', 'right'] as const).map((edge) => (
-              <View key={edge} style={styles.edgeControlBox}>
-                <Text style={[styles.edgeLabel, { color: mutedColor }]}>
-                  {edge.toUpperCase()}: {selectedPage?.crop?.[`${edge}Percent` as keyof PageCrop] ?? 0}%
-                </Text>
-                <View style={styles.miniStepperWrap}>
-                  <TouchableOpacity
-                    onPress={() => updateCropPercent(edge, -2)}
-                    style={[styles.miniStepperBtn, { borderColor: border }]}
-                  >
-                    <Text style={[styles.miniStepperText, { color: textColor }]}>-</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={() => updateCropPercent(edge, 2)}
-                    style={[styles.miniStepperBtn, { borderColor: border }]}
-                  >
-                    <Text style={[styles.miniStepperText, { color: textColor }]}>+</Text>
+                    <MoreVertical size={16} color={mutedColor} />
                   </TouchableOpacity>
                 </View>
               </View>
             ))}
           </View>
-        </View>
-      </View>
-    );
-  }
+        ) : (
+          // List View (Horizontal Rows)
+          displayedDocs.map((doc) => (
+            <View
+              key={doc.id}
+              style={[styles.listRow, { backgroundColor: cardBg, borderColor: border }]}
+            >
+              <TouchableOpacity
+                onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
+                style={styles.listThumbBox}
+                activeOpacity={0.8}
+              >
+                {doc.thumbnailUri ? (
+                  <Image source={{ uri: doc.thumbnailUri }} style={styles.listThumbImg} resizeMode="cover" />
+                ) : (
+                  <FileText size={22} color="#dc2626" />
+                )}
+                <View style={styles.pdfBadge}>
+                  <Text style={styles.pdfBadgeText}>PDF</Text>
+                </View>
+              </TouchableOpacity>
 
-  // ═════════════════════════════════════════════════════════════
-  // STAGE 3: FILTER & ENHANCEMENT (STEP 2)
-  // ═════════════════════════════════════════════════════════════
-  if (stage === 'filter_enhance') {
-    const filtersList: Array<{ id: ScanFilterType; label: string; desc: string }> = [
-      { id: 'orig', label: 'Original', desc: 'Raw Photo' },
-      { id: 'doc', label: 'Clear Scan', desc: 'Helper Contrast' },
-      { id: 'color', label: 'Magic Color', desc: 'Vibrant' },
-      { id: 'bw', label: 'B & W', desc: 'Photocopy' },
-    ];
+              <TouchableOpacity
+                onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
+                style={{ flex: 1, paddingVertical: 4 }}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.listTitle, { color: textColor }]} numberOfLines={1}>
+                  {doc.title}
+                </Text>
+                <Text style={[styles.listSub, { color: mutedColor }]}>
+                  {doc.pageCount} {doc.pageCount === 1 ? 'Page' : 'Pages'} • {new Date(doc.createdAt).toLocaleDateString()}
+                  {doc.fileSize ? ` • ${(doc.fileSize / 1024).toFixed(0)} KB` : ''}
+                </Text>
+              </TouchableOpacity>
 
-    return (
-      <View style={[styles.container, { backgroundColor: bg }]}>
-        {/* Top Filter Selection Chips */}
-        <View style={[styles.filterTopBar, { backgroundColor: cardBg, borderColor: border }]}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipScroll}>
-            {filtersList.map((f) => {
-              const isSelected = (selectedPage?.filter || currentFilter) === f.id;
-              return (
-                <TouchableOpacity
-                  key={f.id}
-                  onPress={() => {
-                    setCurrentFilter(f.id);
-                    setPages((prev) =>
-                      prev.map((p, i) => (i === selectedIdx ? { ...p, filter: f.id } : p))
-                    );
-                  }}
-                  style={[
-                    styles.filterChip,
-                    {
-                      backgroundColor: isSelected ? primaryColor : (isDark ? '#1e293b' : '#f1f5f9'),
-                      borderColor: isSelected ? primaryColor : border,
-                    },
-                  ]}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[styles.filterChipLabel, { color: isSelected ? '#ffffff' : textColor }]}>
-                    {f.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
-        </View>
-
-        {/* Big Cropped Preview with Real-time Filter */}
-        <View style={styles.cropCanvasWrap}>
-          {selectedPage ? (
-            <View style={styles.imageWrap}>
-              <Image
-                source={{ uri: selectedPage.uri }}
-                style={[
-                  styles.previewImage,
-                  {
-                    transform: [{ rotate: `${selectedPage.rotation}deg` }],
-                    opacity: (selectedPage.filter || currentFilter) === 'bw' ? 0.92 : 1,
-                  },
-                ]}
-                resizeMode="contain"
-              />
+              <TouchableOpacity
+                onPress={() => {
+                  setActiveMenuDoc(doc);
+                  setShowDocMenuModal(true);
+                }}
+                style={styles.cardDotBtn}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <MoreVertical size={18} color={mutedColor} />
+              </TouchableOpacity>
             </View>
-          ) : null}
-        </View>
+          ))
+        )}
+      </ScrollView>
 
-        {/* Bottom Bar with Crop readjust, Rotate, Quality, and YES (✓) Button */}
-        <View style={[styles.filterBottomBar, { backgroundColor: cardBg, borderColor: border }]}>
-          <TouchableOpacity
-            onPress={() => setStage('border_adjust')}
-            style={styles.filterBarBtn}
-          >
-            <Crop size={18} color={textColor} />
-            <Text style={[styles.filterBarBtnText, { color: textColor }]}>Crop</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={handleRotateCurrent}
-            style={styles.filterBarBtn}
-          >
-            <RotateCw size={18} color={textColor} />
-            <Text style={[styles.filterBarBtnText, { color: textColor }]}>Rotate</Text>
-          </TouchableOpacity>
-
-          {/* Big Yes / Confirm Checkmark Button */}
-          <TouchableOpacity
-            onPress={handleConfirmAndCreateDoc}
-            style={[styles.confirmYesBtn, { backgroundColor: primaryColor }]}
-            activeOpacity={0.85}
-            disabled={isProcessing}
-          >
-            {isProcessing ? (
-              <ActivityIndicator size="small" color="#ffffff" />
-            ) : (
-              <>
-                <Check size={20} color="#ffffff" />
-                <Text style={styles.confirmYesBtnText}>Confirm (Make PDF)</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
-  // ═════════════════════════════════════════════════════════════
-  // STAGE 4: DOCUMENT DETAIL (STEP 3)
-  // ═════════════════════════════════════════════════════════════
-  return (
-    <View style={[styles.container, { backgroundColor: bg }]}>
-      {/* Top Bar with Back Arrow, Document Title, PDF Badge & 3-Dots */}
-      <View style={[styles.docDetailHeader, { backgroundColor: cardBg, borderColor: border }]}>
+      {/* Floating Scan Action Bar at Bottom */}
+      <View style={[styles.floatingBottomBar, { backgroundColor: bg }]}>
         <TouchableOpacity
-          onPress={() => setStage('folder_view')}
-          style={styles.backBtn}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          onPress={handleStartCamera}
+          style={[styles.mainScanBtn, { backgroundColor: primaryColor }]}
+          activeOpacity={0.85}
         >
-          <ArrowLeft size={22} color={textColor} />
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.detailTitleWrap}
-          onPress={() => {
-            if (currentDoc) {
-              setActiveMenuDoc(currentDoc);
-              setRenameText(currentDoc.title);
-              setShowRenameModal(true);
-            }
-          }}
-        >
-          <View style={styles.titleRow}>
-            <Text style={[styles.detailTitleText, { color: textColor }]} numberOfLines={1}>
-              {currentDoc?.title || docTitle}
-            </Text>
-            <View style={styles.inlinePdfBadge}>
-              <Text style={styles.inlinePdfText}>PDF</Text>
-            </View>
-            <Edit3 size={13} color={mutedColor} style={{ marginLeft: 4 }} />
-          </View>
-          <Text style={[styles.detailSubText, { color: mutedColor }]}>
-            {pages.length} Pages • Ready to Share or Read
+          <Camera size={20} color="#ffffff" />
+          <Text style={styles.mainScanBtnText}>
+            {isBatchMode ? 'Batch Camera Scan' : 'Scan Page'}
           </Text>
         </TouchableOpacity>
 
-        {/* 3 Vertical Dots */}
         <TouchableOpacity
-          onPress={() => setShowDetailDotsMenu(true)}
-          style={styles.threeDotBtn}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          onPress={handleImportGallery}
+          style={[
+            styles.galleryBtn,
+            { backgroundColor: cardBg, borderColor: border, borderWidth: 1 },
+          ]}
+          activeOpacity={0.85}
         >
-          <MoreVertical size={20} color={textColor} />
+          <FolderOpen size={18} color={textColor} />
+          <Text style={[styles.galleryBtnText, { color: textColor }]}>Gallery</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Pages Grid in this Document */}
-      <ScrollView contentContainerStyle={styles.detailGridScroll} showsVerticalScrollIndicator={false}>
-        <View style={styles.pagesGrid}>
-          {pages.map((p, idx) => (
-            <View key={p.id} style={[styles.pageGridCard, { backgroundColor: cardBg, borderColor: border }]}>
-              <Image source={{ uri: p.uri }} style={styles.pageGridImg} resizeMode="contain" />
-              <View style={styles.pageNumberBadge}>
-                <Text style={styles.pageNumberText}>{idx + 1}</Text>
-              </View>
-            </View>
-          ))}
-        </View>
-      </ScrollView>
-
-      {/* Bottom Action Bar: Share & Open */}
-      <View style={[styles.detailBottomBar, { backgroundColor: cardBg, borderColor: border }]}>
-        <TouchableOpacity
-          onPress={() => {
-            if (currentDoc) handleShareDoc(currentDoc);
-          }}
-          style={[styles.shareActionBtn, { backgroundColor: '#059669' }]}
-          activeOpacity={0.85}
-        >
-          <Share2 size={18} color="#ffffff" />
-          <Text style={styles.shareActionBtnText}>Share PDF</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          onPress={async () => {
-            if (currentDoc) {
-              await onOpenPdf(currentDoc.pdfUri, `${currentDoc.title}.pdf`);
-            }
-          }}
-          style={[styles.openActionBtn, { backgroundColor: primaryColor }]}
-          activeOpacity={0.85}
-        >
-          <Eye size={18} color="#ffffff" />
-          <Text style={styles.openActionBtnText}>Open Document</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Modal: Document Detail 3-Dots Menu */}
+      {/* ── TOP 3-DOTS MENU MODAL ── */}
       <Modal
-        visible={showDetailDotsMenu}
+        visible={showTopMenu}
         transparent
         animationType="fade"
-        onRequestClose={() => setShowDetailDotsMenu(false)}
+        onRequestClose={() => setShowTopMenu(false)}
       >
         <TouchableOpacity
           style={styles.modalBackdrop}
           activeOpacity={1}
-          onPress={() => setShowDetailDotsMenu(false)}
+          onPress={() => setShowTopMenu(false)}
         >
           <View style={[styles.actionSheet, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
             <View style={styles.sheetHandle} />
-            <Text style={[styles.sheetTitle, { color: textColor }]}>Document Settings</Text>
+            <Text style={[styles.sheetTitle, { color: textColor }]}>Scanner Options</Text>
 
+            {/* 1. View Mode (Grid vs List) */}
             <TouchableOpacity
               style={styles.sheetOption}
               onPress={() => {
-                setShowDetailDotsMenu(false);
-                setPages((prev) => [...prev].reverse());
-                Alert.alert('Pages Sorted', 'Reversed page order.');
+                setViewMode(viewMode === 'grid' ? 'list' : 'grid');
+                setShowTopMenu(false);
               }}
             >
-              <SlidersHorizontal size={18} color={primaryColor} />
-              <Text style={[styles.sheetOptionText, { color: textColor }]}>Reverse Page Order</Text>
+              {viewMode === 'grid' ? (
+                <>
+                  <List size={18} color={primaryColor} />
+                  <Text style={[styles.sheetOptionText, { color: textColor }]}>View as List</Text>
+                </>
+              ) : (
+                <>
+                  <LayoutGrid size={18} color={primaryColor} />
+                  <Text style={[styles.sheetOptionText, { color: textColor }]}>View as Grid</Text>
+                </>
+              )}
             </TouchableOpacity>
 
+            {/* 2. Sort Documents */}
             <TouchableOpacity
               style={styles.sheetOption}
               onPress={() => {
-                setShowDetailDotsMenu(false);
-                handleStartCamera();
+                setSortMode(sortMode === 'date_desc' ? 'name_asc' : 'date_desc');
+                setShowTopMenu(false);
               }}
             >
-              <Camera size={18} color="#059669" />
-              <Text style={[styles.sheetOptionText, { color: textColor }]}>Append Camera Scan</Text>
+              <ArrowUpDown size={18} color="#059669" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>
+                {sortMode === 'date_desc' ? 'Sort by Name (A-Z)' : 'Sort by Date (Newest)'}
+              </Text>
             </TouchableOpacity>
 
+            {/* 3. Import PDF */}
             <TouchableOpacity
               style={styles.sheetOption}
               onPress={() => {
-                setShowDetailDotsMenu(false);
+                setShowTopMenu(false);
+                handleImportPdfDocument();
+              }}
+            >
+              <Upload size={18} color="#2563eb" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>Import PDF File</Text>
+            </TouchableOpacity>
+
+            {/* 4. Import Images */}
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={() => {
+                setShowTopMenu(false);
                 handleImportGallery();
               }}
             >
-              <FolderOpen size={18} color="#2563eb" />
-              <Text style={[styles.sheetOptionText, { color: textColor }]}>Import More Photos</Text>
+              <FolderOpen size={18} color="#d97706" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>Import Images</Text>
             </TouchableOpacity>
 
+            {/* 5. New Folder */}
             <TouchableOpacity
               style={styles.sheetOption}
               onPress={() => {
-                setShowDetailDotsMenu(false);
-                if (currentDoc) {
-                  setActiveMenuDoc(currentDoc);
-                  setRenameText(currentDoc.title);
-                  setShowRenameModal(true);
-                }
+                setShowTopMenu(false);
+                setShowNewFolderModal(true);
               }}
             >
-              <Edit3 size={18} color="#d97706" />
-              <Text style={[styles.sheetOptionText, { color: textColor }]}>Rename PDF</Text>
+              <FolderPlus size={18} color="#7c3aed" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>New Folder</Text>
+            </TouchableOpacity>
+
+            {/* 6. New Blank Page */}
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={() => {
+                setShowTopMenu(false);
+                handleCreateBlankDocument();
+              }}
+            >
+              <File size={18} color="#0284c7" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>New Blank Page</Text>
+            </TouchableOpacity>
+
+            {/* 7. Clear Folder */}
+            <TouchableOpacity
+              style={[styles.sheetOption, { borderTopWidth: 1, borderTopColor: border, marginTop: 4 }]}
+              onPress={() => {
+                setShowTopMenu(false);
+                handleClearCurrentFolder();
+              }}
+            >
+              <Trash2 size={18} color="#ef4444" />
+              <Text style={[styles.sheetOptionText, { color: '#ef4444' }]}>Clear Folder</Text>
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>
 
-      {/* Rename Modal */}
+      {/* ── Document Item 3-Dots Menu ── */}
+      <Modal
+        visible={showDocMenuModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowDocMenuModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowDocMenuModal(false)}
+        >
+          <View style={[styles.actionSheet, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
+            <View style={styles.sheetHandle} />
+            <Text style={[styles.sheetTitle, { color: textColor }]}>{activeMenuDoc?.title}</Text>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={() => {
+                if (activeMenuDoc) {
+                  setShowDocMenuModal(false);
+                  onOpenPdf(activeMenuDoc.pdfUri, `${activeMenuDoc.title}.pdf`);
+                }
+              }}
+            >
+              <Eye size={18} color={primaryColor} />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>Preview / Open PDF</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={() => {
+                if (activeMenuDoc) {
+                  setShowDocMenuModal(false);
+                  handleShareDoc(activeMenuDoc);
+                }
+              }}
+            >
+              <Share2 size={18} color="#059669" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>Share File</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={() => {
+                if (activeMenuDoc) {
+                  setRenameText(activeMenuDoc.title);
+                  setShowRenameModal(true);
+                }
+              }}
+            >
+              <Edit3 size={18} color="#2563eb" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>Rename</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={() => setShowMoveModal(true)}
+            >
+              <Move size={18} color="#d97706" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>Move to Folder</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.sheetOption, { borderTopWidth: 1, borderTopColor: border, marginTop: 4 }]}
+              onPress={() => {
+                if (activeMenuDoc) {
+                  handleDeleteDoc(activeMenuDoc.id);
+                }
+              }}
+            >
+              <Trash2 size={18} color="#ef4444" />
+              <Text style={[styles.sheetOptionText, { color: '#ef4444' }]}>Delete</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── Modal: Create New Folder ── */}
+      <Modal
+        visible={showNewFolderModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowNewFolderModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.dialogBox, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
+            <Text style={[styles.dialogTitle, { color: textColor }]}>Create New Folder</Text>
+            <TextInput
+              value={newFolderName}
+              onChangeText={setNewFolderName}
+              placeholder="Folder name (e.g. Invoices, Work)..."
+              placeholderTextColor={mutedColor}
+              style={[
+                styles.dialogInput,
+                { color: textColor, borderColor: border, backgroundColor: isDark ? '#0f172a' : '#f8fafc' },
+              ]}
+              autoFocus
+            />
+            <View style={styles.dialogButtons}>
+              <TouchableOpacity
+                onPress={() => setShowNewFolderModal(false)}
+                style={[styles.dialogBtn, { borderColor: border, borderWidth: 1 }]}
+              >
+                <Text style={{ color: mutedColor, fontWeight: '600' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleCreateFolder}
+                style={[styles.dialogBtn, { backgroundColor: primaryColor }]}
+              >
+                <Text style={{ color: '#ffffff', fontWeight: '700' }}>Create</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Modal: Rename Document ── */}
       <Modal
         visible={showRenameModal}
         transparent
@@ -1224,7 +1076,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
       >
         <View style={styles.modalBackdrop}>
           <View style={[styles.dialogBox, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
-            <Text style={[styles.dialogTitle, { color: textColor }]}>Rename PDF Document</Text>
+            <Text style={[styles.dialogTitle, { color: textColor }]}>Rename PDF</Text>
             <TextInput
               value={renameText}
               onChangeText={setRenameText}
@@ -1253,6 +1105,429 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
           </View>
         </View>
       </Modal>
+
+      {/* ── Modal: Move Document to Folder ── */}
+      <Modal
+        visible={showMoveModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowMoveModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.dialogBox, { backgroundColor: isDark ? '#1e293b' : '#ffffff', maxHeight: 380 }]}>
+            <Text style={[styles.dialogTitle, { color: textColor }]}>Move to Folder</Text>
+            <ScrollView style={{ marginVertical: 12 }}>
+              <TouchableOpacity
+                style={[styles.moveFolderOption, { borderBottomColor: border, borderBottomWidth: 1 }]}
+                onPress={() => handleExecuteMove(null)}
+              >
+                <Folder size={18} color={primaryColor} />
+                <Text style={[styles.moveFolderText, { color: textColor }]}>All Scans (Root)</Text>
+              </TouchableOpacity>
+              {folders.map((f) => (
+                <TouchableOpacity
+                  key={f.id}
+                  style={[styles.moveFolderOption, { borderBottomColor: border, borderBottomWidth: 1 }]}
+                  onPress={() => handleExecuteMove(f.id)}
+                >
+                  <Folder size={18} color="#059669" />
+                  <Text style={[styles.moveFolderText, { color: textColor }]}>{f.name}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              onPress={() => setShowMoveModal(false)}
+              style={[styles.dialogBtn, { borderColor: border, borderWidth: 1, alignSelf: 'stretch' }]}
+            >
+              <Text style={{ color: mutedColor, fontWeight: '600', textAlign: 'center' }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ═════════════════════════════════════════════════════════════
+          FULL-SCREEN DEDICATED PAGE MODAL FOR STEPS 1, 2, AND 3
+         ═════════════════════════════════════════════════════════════ */}
+      <Modal
+        visible={stage !== 'folder_view'}
+        animationType="slide"
+        statusBarTranslucent
+        onRequestClose={() => setStage('folder_view')}
+      >
+        <SafeAreaView style={[styles.fullScreenModal, { backgroundColor: bg }]}>
+          {/* ─────────────────────────────────────────────────────────
+              STEP 1: DEDICATED BORDER ADJUSTMENT PAGE
+             ───────────────────────────────────────────────────────── */}
+          {stage === 'border_adjust' && (
+            <View style={{ flex: 1 }}>
+              {/* Clean Top Bar */}
+              <View style={[styles.editorTopBar, { backgroundColor: cardBg, borderColor: border }]}>
+                <TouchableOpacity
+                  onPress={() => setStage('folder_view')}
+                  style={styles.editorBackBtn}
+                >
+                  <ArrowLeft size={22} color={textColor} />
+                </TouchableOpacity>
+
+                <View style={{ alignItems: 'center' }}>
+                  <Text style={[styles.editorTitle, { color: textColor }]}>Adjust Border</Text>
+                  {pages.length > 1 && (
+                    <Text style={[styles.editorSub, { color: mutedColor }]}>
+                      Page {selectedIdx + 1} of {pages.length}
+                    </Text>
+                  )}
+                </View>
+
+                {/* Top Right Checkmark (✓) */}
+                <TouchableOpacity
+                  onPress={handleProceedToFilters}
+                  style={[styles.editorCheckBtn, { backgroundColor: primaryColor }]}
+                  activeOpacity={0.8}
+                  disabled={isProcessing}
+                >
+                  {isProcessing ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <Check size={20} color="#ffffff" />
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              {/* Main Canvas with True Draggable Corner Handles */}
+              <View
+                style={styles.cropCanvasArea}
+                onLayout={(e) => {
+                  const { width, height } = e.nativeEvent.layout;
+                  if (width > 0 && height > 0) {
+                    setCropLayout({ width, height });
+                  }
+                }}
+              >
+                {selectedPage ? (
+                  <View style={styles.cropCanvasInner}>
+                    <Image
+                      source={{ uri: selectedPage.originalUri || selectedPage.uri }}
+                      style={[
+                        styles.canvasImage,
+                        { transform: [{ rotate: `${selectedPage.rotation}deg` }] },
+                      ]}
+                      resizeMode="contain"
+                    />
+
+                    {/* Interactive Draggable Crop Overlay */}
+                    {selectedPage.crop && (
+                      <View
+                        style={[
+                          styles.cropBoundingBox,
+                          {
+                            top: `${selectedPage.crop.topPercent}%`,
+                            bottom: `${selectedPage.crop.bottomPercent}%`,
+                            left: `${selectedPage.crop.leftPercent}%`,
+                            right: `${selectedPage.crop.rightPercent}%`,
+                            borderColor: '#10b981',
+                          },
+                        ]}
+                      >
+                        {/* 4 True Draggable Corner Loupe Handles */}
+                        {/* Top-Left */}
+                        <View
+                          {...panTL.panHandlers}
+                          style={[styles.draggableCorner, styles.tlCorner]}
+                          hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
+                        >
+                          <View style={styles.cornerDot} />
+                        </View>
+
+                        {/* Top-Right */}
+                        <View
+                          {...panTR.panHandlers}
+                          style={[styles.draggableCorner, styles.trCorner]}
+                          hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
+                        >
+                          <View style={styles.cornerDot} />
+                        </View>
+
+                        {/* Bottom-Left */}
+                        <View
+                          {...panBL.panHandlers}
+                          style={[styles.draggableCorner, styles.blCorner]}
+                          hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
+                        >
+                          <View style={styles.cornerDot} />
+                        </View>
+
+                        {/* Bottom-Right */}
+                        <View
+                          {...panBR.panHandlers}
+                          style={[styles.draggableCorner, styles.brCorner]}
+                          hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
+                        >
+                          <View style={styles.cornerDot} />
+                        </View>
+
+                        {/* Center Crosshair Grid */}
+                        <View style={styles.crossLineH} />
+                        <View style={styles.crossLineV} />
+                      </View>
+                    )}
+                  </View>
+                ) : null}
+              </View>
+
+              {/* Multi-Page Navigation if Batch */}
+              {pages.length > 1 && (
+                <View style={[styles.pageStepperBar, { backgroundColor: cardBg, borderColor: border }]}>
+                  <TouchableOpacity
+                    disabled={selectedIdx === 0}
+                    onPress={() => setSelectedIdx(Math.max(0, selectedIdx - 1))}
+                    style={[styles.stepperArrow, { opacity: selectedIdx === 0 ? 0.3 : 1 }]}
+                  >
+                    <ChevronLeft size={20} color={textColor} />
+                  </TouchableOpacity>
+                  <Text style={[styles.stepperText, { color: textColor }]}>
+                    Reviewing Page {selectedIdx + 1} of {pages.length}
+                  </Text>
+                  <TouchableOpacity
+                    disabled={selectedIdx === pages.length - 1}
+                    onPress={() => setSelectedIdx(Math.min(pages.length - 1, selectedIdx + 1))}
+                    style={[styles.stepperArrow, { opacity: selectedIdx === pages.length - 1 ? 0.3 : 1 }]}
+                  >
+                    <ChevronRight size={20} color={textColor} />
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Clean Bottom Tool Bar (No Clutter, No Extra Ratios) */}
+              <View style={[styles.cropBottomBar, { backgroundColor: cardBg, borderColor: border }]}>
+                <TouchableOpacity
+                  onPress={handleAutoDetectCorner}
+                  style={styles.bottomToolBtn}
+                >
+                  <Sparkles size={20} color={primaryColor} />
+                  <Text style={[styles.bottomToolText, { color: primaryColor }]}>Auto-Detect</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={handleFullPhotoCrop}
+                  style={styles.bottomToolBtn}
+                >
+                  <Maximize2 size={20} color={textColor} />
+                  <Text style={[styles.bottomToolText, { color: textColor }]}>Full Photo</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={handleRotateCurrent}
+                  style={styles.bottomToolBtn}
+                >
+                  <RotateCw size={20} color={textColor} />
+                  <Text style={[styles.bottomToolText, { color: textColor }]}>Rotate</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={handleProceedToFilters}
+                  style={[styles.stepNextBtn, { backgroundColor: primaryColor }]}
+                  activeOpacity={0.85}
+                  disabled={isProcessing}
+                >
+                  {isProcessing ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <>
+                      <Text style={styles.stepNextBtnText}>Next</Text>
+                      <Check size={18} color="#ffffff" />
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          {/* ─────────────────────────────────────────────────────────
+              STEP 2: DEDICATED FILTER & ENHANCEMENT PAGE
+             ───────────────────────────────────────────────────────── */}
+          {stage === 'filter_enhance' && (
+            <View style={{ flex: 1 }}>
+              {/* Top Filter Selection Chips */}
+              <View style={[styles.filterTopBar, { backgroundColor: cardBg, borderColor: border }]}>
+                <TouchableOpacity
+                  onPress={() => setStage('border_adjust')}
+                  style={{ padding: 6, marginRight: 8 }}
+                >
+                  <ArrowLeft size={20} color={textColor} />
+                </TouchableOpacity>
+
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipScroll}>
+                  {[
+                    { id: 'orig', label: 'Original', desc: 'Raw Photo' },
+                    { id: 'doc', label: 'Clear Scan', desc: 'Helper Filter' },
+                    { id: 'color', label: 'Magic Color', desc: 'Vibrant' },
+                    { id: 'bw', label: 'B & W', desc: 'Photocopy' },
+                  ].map((f) => {
+                    const isSelected = (selectedPage?.filter || currentFilter) === f.id;
+                    return (
+                      <TouchableOpacity
+                        key={f.id}
+                        onPress={() => {
+                          setCurrentFilter(f.id as ScanFilterType);
+                          setPages((prev) =>
+                            prev.map((p, i) => (i === selectedIdx ? { ...p, filter: f.id as ScanFilterType } : p))
+                          );
+                        }}
+                        style={[
+                          styles.filterChip,
+                          {
+                            backgroundColor: isSelected ? primaryColor : (isDark ? '#1e293b' : '#f1f5f9'),
+                            borderColor: isSelected ? primaryColor : border,
+                          },
+                        ]}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={[styles.filterChipLabel, { color: isSelected ? '#ffffff' : textColor }]}>
+                          {f.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+
+              {/* Visual Filter Canvas (WebView WYSIWYG Rendering) */}
+              <View style={styles.filterCanvasArea}>
+                <WebView
+                  originWhitelist={['*']}
+                  source={{ html: filterPreviewHtml }}
+                  scrollEnabled={false}
+                  style={{ width: '100%', height: '100%', backgroundColor: 'transparent' }}
+                />
+              </View>
+
+              {/* Bottom Bar: Crop, Rotate, and Confirm Make PDF */}
+              <View style={[styles.filterBottomBar, { backgroundColor: cardBg, borderColor: border }]}>
+                <TouchableOpacity
+                  onPress={() => setStage('border_adjust')}
+                  style={styles.filterBarBtn}
+                >
+                  <Crop size={18} color={textColor} />
+                  <Text style={[styles.filterBarBtnText, { color: textColor }]}>Crop</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={handleRotateCurrent}
+                  style={styles.filterBarBtn}
+                >
+                  <RotateCw size={18} color={textColor} />
+                  <Text style={[styles.filterBarBtnText, { color: textColor }]}>Rotate</Text>
+                </TouchableOpacity>
+
+                {/* Big Yes / Confirm Button */}
+                <TouchableOpacity
+                  onPress={handleConfirmAndMakePdf}
+                  style={[styles.confirmYesBtn, { backgroundColor: primaryColor }]}
+                  activeOpacity={0.85}
+                  disabled={isProcessing}
+                >
+                  {isProcessing ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <>
+                      <Check size={20} color="#ffffff" />
+                      <Text style={styles.confirmYesBtnText}>Confirm (Make PDF)</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          {/* ─────────────────────────────────────────────────────────
+              STEP 3: DOCUMENT DETAIL SCREEN
+             ───────────────────────────────────────────────────────── */}
+          {stage === 'doc_detail' && (
+            <View style={{ flex: 1 }}>
+              <View style={[styles.docDetailHeader, { backgroundColor: cardBg, borderColor: border }]}>
+                <TouchableOpacity
+                  onPress={() => setStage('folder_view')}
+                  style={styles.editorBackBtn}
+                >
+                  <ArrowLeft size={22} color={textColor} />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.detailTitleWrap}
+                  onPress={() => {
+                    if (currentDoc) {
+                      setActiveMenuDoc(currentDoc);
+                      setRenameText(currentDoc.title);
+                      setShowRenameModal(true);
+                    }
+                  }}
+                >
+                  <View style={styles.titleRow}>
+                    <Text style={[styles.detailTitleText, { color: textColor }]} numberOfLines={1}>
+                      {currentDoc?.title || docTitle}
+                    </Text>
+                    <View style={styles.inlinePdfBadge}>
+                      <Text style={styles.inlinePdfText}>PDF</Text>
+                    </View>
+                    <Edit3 size={13} color={mutedColor} style={{ marginLeft: 6 }} />
+                  </View>
+                  <Text style={[styles.detailSubText, { color: mutedColor }]}>
+                    {pages.length} Pages • Ready to Share or Read
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => setShowDetailDotsMenu(true)}
+                  style={styles.iconCircleBtn}
+                >
+                  <MoreVertical size={20} color={textColor} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Pages Grid */}
+              <ScrollView contentContainerStyle={styles.detailGridScroll} showsVerticalScrollIndicator={false}>
+                <View style={styles.pagesGrid}>
+                  {pages.map((p, idx) => (
+                    <View key={p.id} style={[styles.pageGridCard, { backgroundColor: cardBg, borderColor: border }]}>
+                      <Image source={{ uri: p.uri }} style={styles.pageGridImg} resizeMode="contain" />
+                      <View style={styles.pageNumberBadge}>
+                        <Text style={styles.pageNumberText}>{idx + 1}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              </ScrollView>
+
+              {/* Bottom Action Bar: Share & Open */}
+              <View style={[styles.detailBottomBar, { backgroundColor: cardBg, borderColor: border }]}>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (currentDoc) handleShareDoc(currentDoc);
+                  }}
+                  style={[styles.shareActionBtn, { backgroundColor: '#059669' }]}
+                  activeOpacity={0.85}
+                >
+                  <Share2 size={18} color="#ffffff" />
+                  <Text style={styles.shareActionBtnText}>Share PDF</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={async () => {
+                    if (currentDoc) {
+                      await onOpenPdf(currentDoc.pdfUri, `${currentDoc.title}.pdf`);
+                    }
+                  }}
+                  style={[styles.openActionBtn, { backgroundColor: primaryColor }]}
+                  activeOpacity={0.85}
+                >
+                  <Eye size={18} color="#ffffff" />
+                  <Text style={styles.openActionBtnText}>Open Document</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+        </SafeAreaView>
+      </Modal>
     </View>
   );
 };
@@ -1261,7 +1536,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  folderHeader: {
+  fullScreenModal: {
+    flex: 1,
+  },
+  mainTopHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -1269,11 +1547,10 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: 1,
   },
-  headerLeft: {
+  titleIconRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    flex: 1,
   },
   headerIconBox: {
     width: 38,
@@ -1283,7 +1560,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   headerTitle: {
-    fontSize: 16,
+    fontSize: 16.5,
     fontWeight: '800',
     letterSpacing: -0.3,
   },
@@ -1292,17 +1569,30 @@ const styles = StyleSheet.create({
     marginTop: 2,
     fontWeight: '500',
   },
-  batchToggle: {
+  topRightActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 16,
+    gap: 8,
   },
-  batchToggleText: {
-    fontSize: 11,
-    fontWeight: '700',
+  iconCircleBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchBarWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+  },
+  searchInput: {
+    flex: 1,
+    height: 38,
+    paddingHorizontal: 10,
+    fontSize: 13.5,
   },
   folderBarWrap: {
     borderBottomWidth: 1,
@@ -1359,7 +1649,50 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     textAlign: 'center',
   },
-  docCard: {
+  gridContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  gridCard: {
+    width: (SCREEN_W - 32 - 12) / 2,
+    borderRadius: 14,
+    borderWidth: 1,
+    overflow: 'hidden',
+    padding: 8,
+  },
+  gridThumbBox: {
+    width: '100%',
+    height: 140,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#fee2e2',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    marginBottom: 8,
+  },
+  gridThumbImg: {
+    width: '100%',
+    height: '100%',
+  },
+  gridMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  gridTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  gridSub: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  cardDotBtn: {
+    padding: 4,
+  },
+  listRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
@@ -1368,7 +1701,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginBottom: 10,
   },
-  docThumbBox: {
+  listThumbBox: {
     width: 48,
     height: 58,
     borderRadius: 8,
@@ -1378,7 +1711,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     position: 'relative',
   },
-  docThumbImg: {
+  listThumbImg: {
     width: '100%',
     height: '100%',
   },
@@ -1396,16 +1729,13 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     color: '#ffffff',
   },
-  docCardTitle: {
+  listTitle: {
     fontSize: 14,
     fontWeight: '700',
     marginBottom: 3,
   },
-  docCardSub: {
+  listSub: {
     fontSize: 11.5,
-  },
-  threeDotBtn: {
-    padding: 8,
   },
   floatingBottomBar: {
     position: 'absolute',
@@ -1528,7 +1858,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  stepTopBar: {
+  editorTopBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -1536,72 +1866,71 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: 1,
   },
-  backBtn: {
+  editorBackBtn: {
     padding: 4,
   },
-  stepTitle: {
-    fontSize: 15,
+  editorTitle: {
+    fontSize: 16,
     fontWeight: '800',
   },
-  stepSub: {
+  editorSub: {
     fontSize: 11,
     marginTop: 1,
   },
-  stepCheckBtn: {
+  editorCheckBtn: {
     width: 36,
     height: 36,
     borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  cropCanvasWrap: {
+  cropCanvasArea: {
     flex: 1,
     padding: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  imageWrap: {
+  cropCanvasInner: {
     width: '100%',
     height: '100%',
     position: 'relative',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  previewImage: {
+  canvasImage: {
     width: '100%',
     height: '100%',
   },
-  cropBoxOverlay: {
+  cropBoundingBox: {
     position: 'absolute',
     borderWidth: 2,
-    borderStyle: 'solid',
     backgroundColor: 'rgba(16, 185, 129, 0.08)',
   },
-  cornerHandle: {
+  draggableCorner: {
     position: 'absolute',
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: '#10b981',
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 5,
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 6,
   },
-  cornerHandleInner: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+  cornerDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
     backgroundColor: '#ffffff',
   },
-  tlCorner: { top: -14, left: -14 },
-  trCorner: { top: -14, right: -14 },
-  blCorner: { bottom: -14, left: -14 },
-  brCorner: { bottom: -14, right: -14 },
-  gridLineH: {
+  tlCorner: { top: -16, left: -16 },
+  trCorner: { top: -16, right: -16 },
+  blCorner: { bottom: -16, left: -16 },
+  brCorner: { bottom: -16, right: -16 },
+  crossLineH: {
     position: 'absolute',
     top: '50%',
     left: 0,
@@ -1609,7 +1938,7 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: 'rgba(16, 185, 129, 0.4)',
   },
-  gridLineV: {
+  crossLineV: {
     position: 'absolute',
     left: '50%',
     top: 0,
@@ -1617,21 +1946,7 @@ const styles = StyleSheet.create({
     width: 1,
     backgroundColor: 'rgba(16, 185, 129, 0.4)',
   },
-  frameActions: {
-    position: 'absolute',
-    top: 10,
-    right: 10,
-    flexDirection: 'row',
-    gap: 8,
-  },
-  floatingActionBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pageNavRow: {
+  pageStepperBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -1639,71 +1954,53 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderTopWidth: 1,
   },
-  pageNavArrow: {
+  stepperArrow: {
     padding: 6,
   },
-  pageNavText: {
+  stepperText: {
     fontSize: 12.5,
     fontWeight: '700',
   },
-  bottomControlCard: {
-    padding: 12,
+  cropBottomBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderTopWidth: 1,
+    gap: 10,
   },
-  cropPresetRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 10,
-  },
-  presetBtn: {
-    flex: 1,
-    flexDirection: 'row',
+  bottomToolBtn: {
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 8,
-    borderRadius: 10,
-    borderWidth: 1,
+    paddingHorizontal: 8,
   },
-  presetBtnText: {
-    fontSize: 11.5,
+  bottomToolText: {
+    fontSize: 11,
     fontWeight: '700',
+    marginTop: 3,
   },
-  stepperEdgeRow: {
+  stepNextBtn: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: 6,
+    paddingHorizontal: 18,
+    height: 42,
+    borderRadius: 21,
   },
-  edgeControlBox: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  edgeLabel: {
-    fontSize: 9.5,
-    fontWeight: '700',
-    marginBottom: 4,
-  },
-  miniStepperWrap: {
-    flexDirection: 'row',
-    gap: 4,
-  },
-  miniStepperBtn: {
-    width: 28,
-    height: 26,
-    borderRadius: 6,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  miniStepperText: {
-    fontSize: 14,
+  stepNextBtnText: {
+    color: '#ffffff',
+    fontSize: 13.5,
     fontWeight: '800',
   },
   filterTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
     borderBottomWidth: 1,
     paddingVertical: 8,
+    paddingHorizontal: 12,
   },
   filterChipScroll: {
-    paddingHorizontal: 16,
     gap: 8,
   },
   filterChip: {
@@ -1715,6 +2012,10 @@ const styles = StyleSheet.create({
   filterChipLabel: {
     fontSize: 12.5,
     fontWeight: '700',
+  },
+  filterCanvasArea: {
+    flex: 1,
+    backgroundColor: 'transparent',
   },
   filterBottomBar: {
     flexDirection: 'row',
