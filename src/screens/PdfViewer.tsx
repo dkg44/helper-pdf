@@ -19,7 +19,7 @@ if (Platform.OS !== 'web') {
       GoogleSignin = gsModule.GoogleSignin;
       GoogleSigninStatusCodes = gsModule.statusCodes || {};
     }
-  } catch {}
+  } catch { }
 }
 
 import appIcon from '../assets/icon.png';
@@ -1345,6 +1345,7 @@ export default function StandalonePdfReader({
   const [showRecent, setShowRecent] = useState(false);
   const [showIndexModal, setShowIndexModal] = useState(false);
   const [showDriveModal, setShowDriveModal] = useState(false);
+  const [navTab, setNavTab] = useState<NavTabType>('home');
   const [isAddingDrive, setIsAddingDrive] = useState(false);
   const [showReaderConvertModal, setShowReaderConvertModal] = useState(false);
   const [readerDocxModalVisible, setReaderDocxModalVisible] = useState(false);
@@ -1604,7 +1605,7 @@ export default function StandalonePdfReader({
                   try {
                     const t = await GoogleSignin.getTokens();
                     if (t?.accessToken) token = t.accessToken;
-                  } catch {}
+                  } catch { }
                 }
               }
               const driveApiUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
@@ -1838,7 +1839,7 @@ export default function StandalonePdfReader({
           drive.accessToken = newToken;
           setConnectedDrives(prev => {
             const updated = prev.map(d => d.id === drive.id ? { ...d, accessToken: newToken } : d);
-            AsyncStorage.setItem(STORAGE_GOOGLE_DRIVES, JSON.stringify(updated)).catch(() => {});
+            AsyncStorage.setItem(STORAGE_GOOGLE_DRIVES, JSON.stringify(updated)).catch(() => { });
             return updated;
           });
           return newToken;
@@ -1863,7 +1864,7 @@ export default function StandalonePdfReader({
           drive.accessToken = newToken;
           setConnectedDrives(prev => {
             const updated = prev.map(d => d.id === drive.id ? { ...d, accessToken: newToken } : d);
-            AsyncStorage.setItem(STORAGE_GOOGLE_DRIVES, JSON.stringify(updated)).catch(() => {});
+            AsyncStorage.setItem(STORAGE_GOOGLE_DRIVES, JSON.stringify(updated)).catch(() => { });
             return updated;
           });
           return newToken;
@@ -1908,7 +1909,7 @@ export default function StandalonePdfReader({
       if (raw) {
         setOfflineDriveFiles(JSON.parse(raw));
       }
-    } catch {}
+    } catch { }
   };
 
   const ensureOfflineDir = async () => {
@@ -1917,7 +1918,7 @@ export default function StandalonePdfReader({
       if (!info.exists) {
         await FileSystem.makeDirectoryAsync(OFFLINE_DRIVE_DIR, { intermediates: true });
       }
-    } catch {}
+    } catch { }
   };
 
   useEffect(() => {
@@ -3190,7 +3191,7 @@ export default function StandalonePdfReader({
     );
   };
 
-    const renderOutlineItems = (items: OutlineItem[], level: number = 0) => {
+  const renderOutlineItems = (items: OutlineItem[], level: number = 0) => {
     return items.map((item, idx) => (
       <View key={`${level}-${idx}-${item.title}`}>
         <TouchableOpacity
@@ -3376,7 +3377,7 @@ export default function StandalonePdfReader({
   const progressWidth = progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
   const closeCurrentPdf = useCallback(() => {
-    try { Speech.stop(); } catch {}
+    try { Speech.stop(); } catch { }
     setIsPlaying(false);
     setIsPaused(false);
     setPdfBase64(null);
@@ -3993,8 +3994,8 @@ export default function StandalonePdfReader({
                                     {isFolder
                                       ? 'Folder • Tap to open'
                                       : isPdf
-                                      ? `${item.size ? (item.size / (1024 * 1024)).toFixed(1) + ' MB • ' : ''}PDF • Tap to read`
-                                      : `File • Non-PDF`}
+                                        ? `${item.size ? (item.size / (1024 * 1024)).toFixed(1) + ' MB • ' : ''}PDF • Tap to read`
+                                        : `File • Non-PDF`}
                                   </Text>
                                 </View>
                                 {isFolder ? (
@@ -4033,6 +4034,87 @@ export default function StandalonePdfReader({
   };
 
   const renderTopBar = () => {
+    // When no PDF is loaded (Home, Files, Scan, Tools)
+    if (!hasPdf) {
+      if (navTab === 'scan' || navTab === 'tools') {
+        return null;
+      }
+
+      return (
+        <View style={[s.header, {
+          backgroundColor: rBg,
+          borderBottomColor: rMuted + '25',
+          paddingTop: hasAppHeader ? 0 : (topPadding + 6),
+          paddingBottom: 8,
+          paddingHorizontal: 16,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }]}>
+          {/* Logo + Brand: Helper PDF / Reader & Scanner */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+            <View style={{
+              width: 38, height: 38, borderRadius: 11,
+              overflow: 'hidden',
+              shadowColor: colors.primary, shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.25, shadowRadius: 4, elevation: 4,
+            }}>
+              <Image
+                source={isDark ? appIconDark : appIcon}
+                style={{ width: 38, height: 38 }}
+                resizeMode="cover"
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 16, fontWeight: '900', color: rText, letterSpacing: -0.3 }} numberOfLines={1}>
+                Helper PDF
+              </Text>
+              <Text style={{ fontSize: 10, color: rMuted, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.8, marginTop: -2 }}>
+                Reader & Scanner
+              </Text>
+            </View>
+          </View>
+
+          {/* Right Action Icons: Cloud Drive + Direct Theme Toggle */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <TouchableOpacity
+              onPress={() => setShowDriveModal(true)}
+              style={{
+                width: 36, height: 36, borderRadius: 18,
+                alignItems: 'center', justifyContent: 'center',
+                backgroundColor: colors.primary + '14',
+                borderColor: colors.primary + '30', borderWidth: 1,
+              }}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <HardDrive size={17} color={colors.primary} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={toggleAppTheme}
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: 5,
+                backgroundColor: colors.primary + '16',
+                borderColor: colors.primary + '35', borderWidth: 1,
+                paddingHorizontal: 11, paddingVertical: 7,
+                borderRadius: 18,
+              }}
+              activeOpacity={0.7}
+            >
+              {appTheme === 'light' && <Moon size={14} color={colors.primary} />}
+              {appTheme === 'dark' && <Sun size={14} color={colors.primary} />}
+              {appTheme === 'midnight' && <Star size={14} color={colors.primary} />}
+              {appTheme === 'forest' && <Leaf size={14} color={colors.primary} />}
+              <Text style={{ fontSize: 11, fontWeight: '800', color: colors.primary, textTransform: 'capitalize' }}>
+                {appTheme}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
     const barContent = (
       <>
         {/* ── Header ─────────────────────────────────────────────────── */}
@@ -4138,10 +4220,10 @@ export default function StandalonePdfReader({
                   }}
                   activeOpacity={0.75}
                 >
-                  {appTheme === 'light'    && <Moon size={14} color={colors.primary} />}
-                  {appTheme === 'dark'     && <Sun  size={14} color={colors.primary} />}
+                  {appTheme === 'light' && <Moon size={14} color={colors.primary} />}
+                  {appTheme === 'dark' && <Sun size={14} color={colors.primary} />}
                   {appTheme === 'midnight' && <Star size={14} color={colors.primary} />}
-                  {appTheme === 'forest'   && <Leaf size={14} color={colors.primary} />}
+                  {appTheme === 'forest' && <Leaf size={14} color={colors.primary} />}
                   <Text style={{ fontSize: 10.5, fontWeight: '700', color: colors.primary, textTransform: 'capitalize' }}>
                     {appTheme}
                   </Text>
@@ -4290,6 +4372,8 @@ export default function StandalonePdfReader({
           </View>
         ) : (
           <EmptyState
+            navTab={navTab}
+            setNavTab={setNavTab}
             rBg={rBg} rText={rText} rMuted={rMuted} primary={colors.primary}
             recentFiles={recentFiles}
             onPick={handlePickDocument}
@@ -5524,6 +5608,8 @@ function EmptyState({
   toggleTheme,
   onTheme,
   onOpenScannedPdf,
+  navTab,
+  setNavTab,
 }: {
   rBg: string;
   rText: string;
@@ -5539,13 +5625,13 @@ function EmptyState({
   toggleTheme: () => Promise<void>;
   onTheme: () => void;
   onOpenScannedPdf?: (uri: string, name: string) => Promise<void>;
+  navTab: NavTabType;
+  setNavTab: (tab: NavTabType) => void;
 }) {
   const insets = useSafeAreaInsets();
   const bottomInset = insets?.bottom ?? 0;
   const isDark = themeKey !== 'light';
 
-  // Navigation tab: 'home' | 'files' | 'scan' | 'tools'
-  const [navTab, setNavTab] = useState<NavTabType>('home');
   const [searchQuery, setSearchQuery] = useState('');
 
   // Modals state for all converters
@@ -5558,10 +5644,10 @@ function EmptyState({
 
   // 1-click theme button icons & labels
   const themeNextIcon: Record<string, React.ReactNode> = {
-    light:    <Moon size={18} color={primary} />,
-    dark:     <Sun  size={18} color={primary} />,
+    light: <Moon size={18} color={primary} />,
+    dark: <Sun size={18} color={primary} />,
     midnight: <Star size={18} color={primary} />,
-    forest:   <Leaf size={18} color={primary} />,
+    forest: <Leaf size={18} color={primary} />,
   };
   const themeNextLabel: Record<string, string> = {
     light: 'Dark', dark: 'Midnight', midnight: 'Forest', forest: 'Light',
@@ -5681,76 +5767,6 @@ function EmptyState({
           contentContainerStyle={{ flexGrow: 1 }}
           showsVerticalScrollIndicator={false}
         >
-          {/* ── Acrobat Top Bar (Only visible on Home and Files tabs) ── */}
-          {(navTab === 'home' || navTab === 'files') && (
-            <View style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              paddingHorizontal: 18,
-              paddingTop: 16,
-              paddingBottom: 10,
-            }}>
-              {/* Brand: Logo + App Name */}
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-                <View style={{
-                  width: 38, height: 38, borderRadius: 12,
-                  overflow: 'hidden',
-                  shadowColor: primary, shadowOffset: { width: 0, height: 3 },
-                  shadowOpacity: 0.3, shadowRadius: 6, elevation: 5,
-                }}>
-                  <Image
-                    source={isDark ? appIconDark : appIcon}
-                    style={{ width: 38, height: 38 }}
-                    resizeMode="cover"
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 16, fontWeight: '900', color: rText, letterSpacing: -0.3 }} numberOfLines={1}>
-                    Helper PDF reader & Scanner
-                  </Text>
-                </View>
-              </View>
-
-              {/* Right Action Icons: Cloud Drive + Direct Moon Theme Toggle */}
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                {onOpenDrive && (
-                  <TouchableOpacity
-                    onPress={onOpenDrive}
-                    style={{
-                      width: 38, height: 38, borderRadius: 19,
-                      alignItems: 'center', justifyContent: 'center',
-                      backgroundColor: primary + '14',
-                      borderColor: primary + '30', borderWidth: 1,
-                    }}
-                    activeOpacity={0.7}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  >
-                    <HardDrive size={18} color={primary} />
-                  </TouchableOpacity>
-                )}
-
-                {/* Direct Theme Toggle upon 1-click */}
-                <TouchableOpacity
-                  onPress={toggleTheme}
-                  style={{
-                    flexDirection: 'row', alignItems: 'center', gap: 5,
-                    backgroundColor: primary + '16',
-                    borderColor: primary + '35', borderWidth: 1,
-                    paddingHorizontal: 12, paddingVertical: 8,
-                    borderRadius: 20,
-                  }}
-                  activeOpacity={0.7}
-                >
-                  {themeNextIcon[themeKey] ?? <Moon size={17} color={primary} />}
-                  <Text style={{ fontSize: 11.5, fontWeight: '800', color: primary }}>
-                    {themeNextLabel[themeKey] ?? 'Theme'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-
           {/* ═══════════════════════════════════════════════════════
               TAB 1: HOME
              ═══════════════════════════════════════════════════════ */}
