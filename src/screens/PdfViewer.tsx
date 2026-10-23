@@ -19,10 +19,7 @@ if (Platform.OS !== 'web') {
   } catch {}
 }
 
-import logoLight from '../assets/logo_light.png';
-import logoDark from '../assets/logo_dark.png';
-// logoMidnight not available - use logoDark
-// logoForest not available - use logoDark
+import appIcon from '../assets/icon.png';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Speech from 'expo-speech';
@@ -36,7 +33,8 @@ import {
   Search, Bookmark, BookmarkCheck, List, X, ZoomIn, ZoomOut,
   Clock, Trash2, Copy, Hash, RefreshCw, ChevronDown, Sparkles, MoreHorizontal,
   BookOpen, ListTree, HardDrive, Cloud, Plus, Folder, Lock, ExternalLink, Link,
-  LogOut, Check, MoreVertical, Download, CheckCircle2, Edit3
+  LogOut, Check, MoreVertical, Download, CheckCircle2, Edit3,
+  Moon, Sun, Star, Leaf
 } from 'lucide-react-native';
 import { useTheme } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -1199,7 +1197,7 @@ export default function StandalonePdfReader({
   initialBase64?: string | null;
   hasAppHeader?: boolean;
 }) {
-  const { colors } = useTheme();
+  const { colors, theme: appTheme, toggleTheme: toggleAppTheme } = useTheme();
   const insets = useSafeAreaInsets();
 
   const rawTopInset = insets?.top ?? 0;
@@ -4050,9 +4048,27 @@ export default function StandalonePdfReader({
             )}
 
             {!hasPdf && (
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <TouchableOpacity style={s.hBtn} onPress={() => setShowTheme(true)}>
-                  <Coffee size={18} color={rText} />
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                {/* App theme toggle chip */}
+                <TouchableOpacity
+                  onPress={toggleAppTheme}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 4,
+                    backgroundColor: colors.primary + '18',
+                    borderColor: colors.primary + '40',
+                    borderWidth: 1,
+                    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 16,
+                    marginRight: 4,
+                  }}
+                  activeOpacity={0.75}
+                >
+                  {appTheme === 'light'    && <Moon size={14} color={colors.primary} />}
+                  {appTheme === 'dark'     && <Sun  size={14} color={colors.primary} />}
+                  {appTheme === 'midnight' && <Star size={14} color={colors.primary} />}
+                  {appTheme === 'forest'   && <Leaf size={14} color={colors.primary} />}
+                  <Text style={{ fontSize: 10.5, fontWeight: '700', color: colors.primary, textTransform: 'capitalize' }}>
+                    {appTheme}
+                  </Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={s.hBtn} onPress={handlePickDocument}>
                   <FolderOpen size={18} color={rText} />
@@ -5267,97 +5283,182 @@ function EmptyState({ rBg, rText, rMuted, primary, recentFiles, onPick, onOpenDr
   themeKey: string;
   onTheme: () => void;
 }) {
-  const rt = READER_THEMES.find(t => t.key === themeKey)!;
-
-  const getLogoSource = () => {
-    switch (themeKey) {
-      case 'light': return logoLight;
-      case 'dark': return logoDark;
-      case 'midnight': return logoDark;
-      case 'forest': return logoDark;
-      default: return logoLight;
-    }
+  const themeIcon: Record<string, React.ReactNode> = {
+    light:    <Moon size={17} color={rMuted} />,
+    dark:     <Sun  size={17} color={rMuted} />,
+    midnight: <Star size={17} color={rMuted} />,
+    forest:   <Leaf size={17} color={rMuted} />,
+  };
+  const themeLabel: Record<string, string> = {
+    light: 'Light', dark: 'Dark', midnight: 'Midnight', forest: 'Forest',
   };
 
+  const features = [
+    { icon: <Search size={15} color={primary} />,   label: 'In-PDF Search' },
+    { icon: <Volume2 size={15} color={primary} />,  label: 'Text to Speech' },
+    { icon: <Bookmark size={15} color={primary} />, label: 'Bookmarks' },
+    { icon: <HardDrive size={15} color={primary} />,label: 'Google Drive' },
+    { icon: <BookOpen size={15} color={primary} />, label: 'DOCX Support' },
+    { icon: <ZoomIn size={15} color={primary} />,   label: 'Pinch Zoom' },
+  ];
+
   return (
-    <ScrollView contentContainerStyle={[s.empty, { backgroundColor: rBg }]}>
-      <Image
-        source={getLogoSource()}
-        style={{ width: 70, height: 70, marginBottom: 18 }}
-        resizeMode="contain"
-      />
-      <Text style={[s.emptyTitle, { color: rText }]}>PDF Reader</Text>
-      <Text style={[s.emptyDesc, { color: rMuted }]}>
-        Open any PDF from your device or Google Drive to read visually or listen with built-in audio.
-      </Text>
-      <View style={{ flexDirection: 'row', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
-        <TouchableOpacity style={[s.pickBig, { backgroundColor: primary }]} onPress={onPick}>
+    <ScrollView
+      contentContainerStyle={{ flexGrow: 1, backgroundColor: rBg, paddingBottom: 48 }}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* Hero section */}
+      <View style={{
+        alignItems: 'center',
+        paddingTop: 52,
+        paddingBottom: 32,
+        paddingHorizontal: 24,
+      }}>
+        {/* Theme toggle chip — top right */}
+        <View style={{ position: 'absolute', top: 16, right: 20 }}>
+          <TouchableOpacity
+            onPress={onTheme}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 5,
+              backgroundColor: primary + '18',
+              borderColor: primary + '40',
+              borderWidth: 1,
+              paddingHorizontal: 11,
+              paddingVertical: 6,
+              borderRadius: 20,
+            }}
+            activeOpacity={0.75}
+          >
+            {themeIcon[themeKey] ?? <Moon size={17} color={rMuted} />}
+            <Text style={{ fontSize: 11, fontWeight: '700', color: primary }}>
+              {themeLabel[themeKey] ?? 'Theme'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* App icon */}
+        <View style={{
+          width: 96, height: 96, borderRadius: 26,
+          overflow: 'hidden',
+          shadowColor: primary, shadowOffset: { width: 0, height: 6 },
+          shadowOpacity: 0.35, shadowRadius: 16,
+          elevation: 10, marginBottom: 18,
+        }}>
+          <Image source={appIcon} style={{ width: 96, height: 96 }} resizeMode="cover" />
+        </View>
+
+        <Text style={{ fontSize: 26, fontWeight: '900', color: rText, letterSpacing: -0.5, marginBottom: 6 }}>
+          Helper PDF Reader
+        </Text>
+        <Text style={{ fontSize: 13.5, color: rMuted, textAlign: 'center', lineHeight: 21, maxWidth: 300, marginBottom: 28 }}>
+          Read, listen & search any PDF or DOCX — from your device or Google Drive, fully offline.
+        </Text>
+
+        {/* Primary action buttons */}
+        <TouchableOpacity
+          style={{
+            flexDirection: 'row', alignItems: 'center', gap: 10,
+            backgroundColor: primary, paddingHorizontal: 30, paddingVertical: 15,
+            borderRadius: 16, width: '100%', justifyContent: 'center',
+            elevation: 4, shadowColor: primary, shadowOffset: { width: 0, height: 4 },
+            shadowOpacity: 0.3, shadowRadius: 10, marginBottom: 10,
+          }}
+          onPress={onPick}
+          activeOpacity={0.85}
+        >
           <FolderOpen size={20} color="#fff" />
-          <Text style={s.pickBigText}>Choose PDF File</Text>
+          <Text style={{ color: '#fff', fontSize: 16, fontWeight: '800' }}>Open PDF / DOCX</Text>
         </TouchableOpacity>
 
         {onOpenDrive && (
-          <TouchableOpacity style={[s.pickBig, { backgroundColor: '#059669' }]} onPress={onOpenDrive}>
-            <HardDrive size={20} color="#fff" />
-            <Text style={s.pickBigText}>Google Drive</Text>
+          <TouchableOpacity
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 10,
+              backgroundColor: rBg, borderColor: primary + '50', borderWidth: 1.5,
+              paddingHorizontal: 30, paddingVertical: 13,
+              borderRadius: 16, width: '100%', justifyContent: 'center',
+            }}
+            onPress={onOpenDrive}
+            activeOpacity={0.85}
+          >
+            <HardDrive size={18} color={primary} />
+            <Text style={{ color: primary, fontSize: 14, fontWeight: '800' }}>Browse Google Drive</Text>
           </TouchableOpacity>
         )}
       </View>
 
+      {/* Feature chips grid */}
+      <View style={{ paddingHorizontal: 20, marginBottom: 24 }}>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+          {features.map((f, i) => (
+            <View key={i} style={{
+              flexDirection: 'row', alignItems: 'center', gap: 6,
+              backgroundColor: primary + '12', borderColor: primary + '25',
+              borderWidth: 1, paddingHorizontal: 12, paddingVertical: 7,
+              borderRadius: 20,
+            }}>
+              {f.icon}
+              <Text style={{ fontSize: 12, fontWeight: '700', color: rText }}>{f.label}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+
+      {/* Divider */}
+      <View style={{ height: 1, backgroundColor: rMuted + '20', marginHorizontal: 20, marginBottom: 20 }} />
+
       {/* Recent files */}
       {recentFiles.length > 0 && (
-        <View style={{ width: '100%', marginTop: 28 }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
-              <Clock size={14} color={rMuted} />
-              <Text style={{ fontSize: 12, fontWeight: '700', color: rMuted, textTransform: 'uppercase' }}>Recent</Text>
-            </View>
+        <View style={{ paddingHorizontal: 20 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <Text style={{ fontSize: 13, fontWeight: '800', color: rText }}>⏱ Recent</Text>
             <TouchableOpacity onPress={onClearRecent}>
-              <Text style={{ fontSize: 11, color: rMuted, fontWeight: '600' }}>Clear</Text>
+              <Text style={{ fontSize: 11, color: '#ef4444', fontWeight: '600' }}>Clear All</Text>
             </TouchableOpacity>
           </View>
-          {recentFiles.map(f => (
-            <View
-              key={f.uri}
-              style={[s.recentRow, { borderColor: rMuted + '30', backgroundColor: rMuted + '10', flexDirection: 'row', alignItems: 'center' }] as any}
-            >
-              <TouchableOpacity
-                style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}
-                onPress={() => onOpenRecent(f)}
-              >
+          {recentFiles.map((f, idx) => (
+            <View key={idx} style={{
+              flexDirection: 'row', alignItems: 'center', gap: 10,
+              backgroundColor: rMuted + '10', borderColor: rMuted + '20',
+              borderWidth: 1, borderRadius: 12, padding: 12, marginBottom: 8,
+            }}>
+              <View style={{
+                width: 36, height: 36, borderRadius: 10,
+                backgroundColor: primary + '18', alignItems: 'center', justifyContent: 'center',
+              }}>
                 <FileText size={16} color={primary} />
-                <Text style={[s.recentName, { color: rText }]} numberOfLines={1}>{f.name}</Text>
-              </TouchableOpacity>
+              </View>
               <TouchableOpacity
-                style={{ padding: 6 }}
-                onPress={() => onRemoveRecent(f)}
+                style={{ flex: 1 }}
+                onPress={() => onOpenRecent(f)}
+                activeOpacity={0.75}
               >
-                <Trash2 size={14} color={'#ef4444'} />
+                <Text style={{ fontSize: 13, fontWeight: '700', color: rText }} numberOfLines={1}>{f.name}</Text>
+                <Text style={{ fontSize: 10.5, color: rMuted, marginTop: 2 }}>
+                  {new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={{ padding: 6 }} onPress={() => onRemoveRecent(f)}>
+                <Trash2 size={15} color="#ef4444" />
               </TouchableOpacity>
             </View>
           ))}
         </View>
       )}
 
-      {/* Theme swatches */}
-      <View style={{ marginTop: 24, alignItems: 'center' }}>
-        <TouchableOpacity onPress={onTheme} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 }}>
-          <Coffee size={14} color={rMuted} />
-          <Text style={{ fontSize: 12, color: rMuted, fontWeight: '600' }}>Change Reading Theme</Text>
-        </TouchableOpacity>
-        <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
-          {READER_THEMES.map(t => (
-            <View key={t.key} style={[s.themeDot, { backgroundColor: t.bg ?? '#1a1a2e', borderColor: t.key === themeKey ? primary : 'transparent' }]} />
-          ))}
+      {recentFiles.length === 0 && (
+        <View style={{ alignItems: 'center', paddingVertical: 16, opacity: 0.45 }}>
+          <Clock size={28} color={rMuted} />
+          <Text style={{ fontSize: 12, color: rMuted, marginTop: 8, fontWeight: '600' }}>No recent files yet</Text>
         </View>
-      </View>
+      )}
     </ScrollView>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
+
 const s = StyleSheet.create({
   root: { flex: 1 },
 
