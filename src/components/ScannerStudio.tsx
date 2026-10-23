@@ -13,8 +13,9 @@ import {
   Modal,
   Platform,
   PanResponder,
+  StatusBar,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Camera,
   RotateCw,
@@ -166,6 +167,14 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   // PDF page extraction loader state
   const [isExtractingPdf, setIsExtractingPdf] = useState(false);
   const [extractStatusText, setExtractStatusText] = useState('Extracting PDF pages...');
+
+  // PDF Preview Box Modal state
+  const [showPdfPreviewModal, setShowPdfPreviewModal] = useState(false);
+  const [previewDoc, setPreviewDoc] = useState<SavedScanDoc | null>(null);
+
+  // Insets and Android status bar height
+  const insets = useSafeAreaInsets();
+  const topSafePadding = Math.max(insets.top, Platform.OS === 'android' ? (StatusBar.currentHeight || 28) : 0);
 
   // Layout size for draggable crop canvas
   const [cropLayout, setCropLayout] = useState({ width: SCREEN_W - 32, height: SCREEN_H * 0.58 });
@@ -633,9 +642,10 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
       await addSavedScanDoc(updatedDoc);
       await loadFoldersAndDocs();
       setCurrentDoc(updatedDoc);
-      onOpenPdf(updatedDoc.pdfUri, `${updatedDoc.title}.pdf`);
+      setPreviewDoc(updatedDoc);
+      setShowPdfPreviewModal(true);
     } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Could not compile and open PDF.');
+      Alert.alert('Error', err?.message || 'Could not compile PDF preview.');
     } finally {
       setIsProcessing(false);
     }
@@ -846,7 +856,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
       {stage === 'folder_view' && (
         <View style={{ flex: 1 }}>
           {/* ── Top Header with Folder Context, Search, and 3-Vertical-Dots Menu ── */}
-          <View style={[styles.mainTopHeader, { backgroundColor: cardBg, borderColor: border }]}>
+          <View style={[styles.mainTopHeader, { backgroundColor: cardBg, borderColor: border, paddingTop: topSafePadding + 6 }]}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <View style={[styles.headerIconBox, { backgroundColor: primaryColor + '18', width: 34, height: 34, borderRadius: 10 }]}>
                 <Folder size={18} color={primaryColor} />
@@ -1261,7 +1271,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
       {/* ── STAGE 2: DOCUMENT DETAIL / EDIT VIEW (IN-PAGE BENEATH ROOT TOP NAVBAR) ── */}
       {stage === 'doc_detail' && (
         <View style={{ flex: 1 }}>
-          <View style={[styles.docDetailHeader, { backgroundColor: cardBg, borderColor: border }]}>
+          <View style={[styles.docDetailHeader, { backgroundColor: cardBg, borderColor: border, paddingTop: topSafePadding + 6 }]}>
             <TouchableOpacity
               onPress={() => setStage('folder_view')}
               style={styles.editorBackBtn}
@@ -1916,6 +1926,112 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
         </View>
       </Modal>
 
+      {/* ── MODAL: PDF PREVIEW & OPEN IN READER ── */}
+      <Modal
+        visible={showPdfPreviewModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowPdfPreviewModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowPdfPreviewModal(false)}
+        >
+          <TouchableOpacity
+            activeOpacity={1}
+            style={[styles.pdfPreviewDialog, { backgroundColor: isDark ? '#1e293b' : '#ffffff', borderColor: border }]}
+          >
+            {/* Dialog Header */}
+            <View style={styles.previewDialogHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={[styles.previewIconWrap, { backgroundColor: '#fee2e2' }]}>
+                  <FileText size={18} color="#dc2626" />
+                </View>
+                <Text style={[styles.previewDialogTitle, { color: textColor }]}>PDF Preview</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setShowPdfPreviewModal(false)}
+                style={styles.dialogCloseBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <X size={20} color={mutedColor} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Document Preview Box */}
+            <View style={[styles.previewCardBox, { backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : '#f8fafc', borderColor: border }]}>
+              <View style={styles.previewThumbContainer}>
+                {previewDoc?.thumbnailUri || pages[0]?.uri ? (
+                  <Image
+                    source={{ uri: previewDoc?.thumbnailUri || pages[0]?.uri }}
+                    style={styles.previewThumbImage}
+                    resizeMode="contain"
+                  />
+                ) : (
+                  <FileText size={48} color={mutedColor} />
+                )}
+                <View style={styles.previewBadgeOverlay}>
+                  <Text style={styles.previewBadgeText}>PDF</Text>
+                </View>
+              </View>
+
+              <View style={styles.previewMetaBox}>
+                <Text style={[styles.previewDocTitle, { color: textColor }]} numberOfLines={2}>
+                  {previewDoc?.title || currentDoc?.title || docTitle || 'Scanned Document'}
+                </Text>
+                <Text style={[styles.previewDocStats, { color: mutedColor }]}>
+                  {pages.length} {pages.length === 1 ? 'Page' : 'Pages'}
+                  {previewDoc?.fileSize ? ` • ${(previewDoc.fileSize / 1024).toFixed(0)} KB` : ''}
+                </Text>
+                <View style={styles.previewReadyTag}>
+                  <CheckCircle2 size={13} color="#10b981" />
+                  <Text style={styles.previewReadyText}>PDF Ready to Read</Text>
+                </View>
+              </View>
+            </View>
+
+            {/* Actions: "Open in PDF Reader", "Share PDF", and "Back to Edit" */}
+            <View style={styles.previewActionsCol}>
+              <TouchableOpacity
+                onPress={async () => {
+                  if (previewDoc?.pdfUri) {
+                    setShowPdfPreviewModal(false);
+                    await onOpenPdf(previewDoc.pdfUri, `${previewDoc.title}.pdf`);
+                  }
+                }}
+                style={[styles.openInReaderBtn, { backgroundColor: primaryColor }]}
+                activeOpacity={0.85}
+              >
+                <FileText size={18} color="#ffffff" />
+                <Text style={styles.openInReaderBtnText}>Open in PDF Reader</Text>
+              </TouchableOpacity>
+
+              <View style={{ flexDirection: 'row', gap: 10 }}>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (previewDoc) handleShareDoc(previewDoc);
+                  }}
+                  style={[styles.previewSecondaryBtn, { borderColor: border, flex: 1 }]}
+                  activeOpacity={0.8}
+                >
+                  <Share2 size={16} color={textColor} />
+                  <Text style={[styles.previewSecondaryBtnText, { color: textColor }]}>Share PDF</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => setShowPdfPreviewModal(false)}
+                  style={[styles.previewSecondaryBtn, { borderColor: border, flex: 1 }]}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.previewSecondaryBtnText, { color: mutedColor }]}>Back to Edit</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+
       {/* ═════════════════════════════════════════════════════════════
           FULL-SCREEN DEDICATED PAGE MODAL FOR STEPS 1, 2, AND 3
          ═════════════════════════════════════════════════════════════ */}
@@ -1932,7 +2048,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
           {stage === 'border_adjust' && (
             <View style={{ flex: 1 }}>
               {/* Clean Top Bar */}
-              <View style={[styles.editorTopBar, { backgroundColor: cardBg, borderColor: border }]}>
+              <View style={[styles.editorTopBar, { backgroundColor: cardBg, borderColor: border, paddingTop: topSafePadding + 8 }]}>
                 <TouchableOpacity
                   onPress={() => setStage(currentDoc ? 'doc_detail' : 'folder_view')}
                   style={styles.editorBackBtn}
@@ -2149,9 +2265,9 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
           {stage === 'filter_enhance' && (
             <View style={{ flex: 1 }}>
               {/* Top Filter Selection Chips */}
-              <View style={[styles.filterTopBar, { backgroundColor: cardBg, borderColor: border }]}>
+              <View style={[styles.filterTopBar, { backgroundColor: cardBg, borderColor: border, paddingTop: topSafePadding + 8 }]}>
                 <TouchableOpacity
-                  onPress={() => setStage('border_adjust')}
+                  onPress={() => setStage(currentDoc ? 'doc_detail' : 'border_adjust')}
                   style={{ padding: 6, marginRight: 8 }}
                 >
                   <ArrowLeft size={20} color={textColor} />
@@ -3076,6 +3192,126 @@ const styles = StyleSheet.create({
     borderRadius: 23,
   },
   addPageBottomBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  pdfPreviewDialog: {
+    width: '90%',
+    maxWidth: 400,
+    borderRadius: 20,
+    borderWidth: 1,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  previewDialogHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  previewIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewDialogTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  dialogCloseBtn: {
+    padding: 4,
+  },
+  previewCardBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1,
+    marginBottom: 20,
+  },
+  previewThumbContainer: {
+    width: 76,
+    height: 98,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#fee2e2',
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewThumbImage: {
+    width: '100%',
+    height: '100%',
+  },
+  previewBadgeOverlay: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    backgroundColor: '#dc2626',
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  previewBadgeText: {
+    fontSize: 8.5,
+    fontWeight: '900',
+    color: '#ffffff',
+  },
+  previewMetaBox: {
+    flex: 1,
+  },
+  previewDocTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  previewDocStats: {
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  previewReadyTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  previewReadyText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#10b981',
+  },
+  previewActionsCol: {
+    gap: 10,
+  },
+  openInReaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    height: 48,
+    borderRadius: 14,
+  },
+  openInReaderBtnText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  previewSecondaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 42,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  previewSecondaryBtnText: {
     fontSize: 13,
     fontWeight: '700',
   },

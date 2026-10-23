@@ -1379,6 +1379,7 @@ export default function StandalonePdfReader({
   const [showIndexModal, setShowIndexModal] = useState(false);
   const [showDriveModal, setShowDriveModal] = useState(false);
   const [navTab, setNavTab] = useState<NavTabType>('home');
+  const [openedFromScan, setOpenedFromScan] = useState(false);
   const [isAddingDrive, setIsAddingDrive] = useState(false);
   const [showReaderConvertModal, setShowReaderConvertModal] = useState(false);
   const [readerDocxModalVisible, setReaderDocxModalVisible] = useState(false);
@@ -1760,6 +1761,10 @@ export default function StandalonePdfReader({
       setCurrentPage(1);
       setTtsPage(1);
       stopSpeaking();
+      if (openedFromScan) {
+        setNavTab('scan');
+        setOpenedFromScan(false);
+      }
     }
   };
 
@@ -3459,8 +3464,12 @@ export default function StandalonePdfReader({
     setPdfUri(null);
     setPdfName('');
     setShowDriveModal(false);
+    if (openedFromScan) {
+      setNavTab('scan');
+      setOpenedFromScan(false);
+    }
     if (onClose) onClose();
-  }, [onClose]);
+  }, [onClose, openedFromScan]);
 
   useEffect(() => {
     if (!hasPdf) return;
@@ -4109,8 +4118,11 @@ export default function StandalonePdfReader({
   };
 
   const renderTopBar = () => {
-    // When no PDF is loaded (Home, Files, Scan, Tools) - show on all pages
+    // When no PDF is loaded: do not render top navbar during scan tab
     if (!hasPdf) {
+      if (navTab === 'scan') {
+        return null;
+      }
       return (
         <View style={[s.header, {
           backgroundColor: rBg,
@@ -4465,8 +4477,15 @@ export default function StandalonePdfReader({
       )}
 
       {/* ── Content ───────────────────────────────────────────────── */}
-      {!hasPdf ? (
-        showDriveModal ? (
+      <View
+        style={[
+          { flex: 1 },
+          !hasPdf
+            ? { flex: 1 }
+            : { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, opacity: 0, pointerEvents: 'none' as const, zIndex: -1 },
+        ]}
+      >
+        {showDriveModal ? (
           <View style={{ flex: 1, backgroundColor: colors.card }}>
             {renderDriveContent()}
           </View>
@@ -4522,15 +4541,18 @@ export default function StandalonePdfReader({
             onTheme={() => setShowTheme(true)}
             onOpenScannedPdf={async (uri: string, name: string) => {
               try {
+                setOpenedFromScan(true);
                 await openPdf(uri, name);
               } catch (err: any) {
                 Alert.alert('Error', err?.message || 'Could not open generated PDF.');
               }
             }}
           />
-        )
-      ) : (
-        /* ── Content Container (Both Read & Listen mounted persistently) ── */
+        )}
+      </View>
+
+      {/* ── Content Container (Both Read & Listen mounted persistently) ── */}
+      {hasPdf && (
         <View style={{ flex: 1 }}>
           {/* ── Visual PDF View ──
                IMPORTANT: Do NOT use display:'none' here! On Android, hiding a WebView
