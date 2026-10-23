@@ -57,6 +57,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { WebView } from 'react-native-webview';
+import { LiveScannerCamera } from './LiveScannerCamera';
 
 import {
   ScannedPage,
@@ -109,6 +110,9 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   // Search state
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Live Camera state
+  const [showLiveCamera, setShowLiveCamera] = useState(false);
 
   // Top 3-dots vertical menu modal
   const [showTopMenu, setShowTopMenu] = useState(false);
@@ -277,48 +281,24 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   ).current;
 
   // ── Capture & Batch Scanning ────────────────────────────────
-  const handleStartCamera = async () => {
-    try {
-      const page = await capturePageWithCamera(currentFilter);
-      if (page) {
-        setPages([page]);
+  const handleStartCamera = () => {
+    setShowLiveCamera(true);
+  };
+
+  const handleFinishLiveCamera = (captured: ScannedPage[]) => {
+    setShowLiveCamera(false);
+    if (captured.length > 0) {
+      if (stage === 'doc_detail') {
+        setPages((prev) => [...prev, ...captured]);
+      } else {
+        setPages(captured);
         setSelectedIdx(0);
         const now = new Date();
         const autoName = `Scan_${now.getMonth() + 1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
         setDocTitle(autoName);
         setStage('border_adjust');
-
-        if (isBatchMode) {
-          promptForNextBatchPage([page]);
-        }
       }
-    } catch (e: any) {
-      Alert.alert('Camera', e?.message || 'Could not open camera.');
     }
-  };
-
-  const promptForNextBatchPage = (existingPages: ScannedPage[]) => {
-    setTimeout(() => {
-      Alert.alert(
-        'Batch Scan Mode',
-        `Page ${existingPages.length} captured! Scan another page or adjust borders?`,
-        [
-          { text: 'Adjust Borders', style: 'cancel' },
-          {
-            text: '+ Scan Next Page',
-            onPress: async () => {
-              const nextPage = await capturePageWithCamera(currentFilter);
-              if (nextPage) {
-                const combined = [...existingPages, nextPage];
-                setPages(combined);
-                setSelectedIdx(combined.length - 1);
-                promptForNextBatchPage(combined);
-              }
-            },
-          },
-        ]
-      );
-    }, 350);
   };
 
   const handleImportGallery = async () => {
@@ -742,7 +722,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                       {doc.title}
                     </Text>
                     <Text style={[styles.gridSub, { color: mutedColor }]}>
-                      {doc.pageCount} {doc.pageCount === 1 ? 'Page' : 'Pages'}
+                      {doc.pageCount}p • {doc.fileSize ? `${(doc.fileSize / 1024).toFixed(0)} KB • ` : ''}{new Date(doc.createdAt).toLocaleDateString()}
                     </Text>
                   </TouchableOpacity>
 
@@ -1472,7 +1452,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                     <Edit3 size={13} color={mutedColor} style={{ marginLeft: 6 }} />
                   </View>
                   <Text style={[styles.detailSubText, { color: mutedColor }]}>
-                    {pages.length} Pages • Ready to Share or Read
+                    {pages.length} Pages • {currentDoc?.fileSize ? `${(currentDoc.fileSize / 1024).toFixed(0)} KB • ` : ''}{currentDoc?.createdAt ? new Date(currentDoc.createdAt).toLocaleDateString() : new Date().toLocaleDateString()}
                   </Text>
                 </TouchableOpacity>
 
@@ -1528,6 +1508,14 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
           )}
         </SafeAreaView>
       </Modal>
+
+      {/* ── Live Scanner Camera with Modes (Single, Batch, ID Card, Passport), Auto-Snap & Torch ── */}
+      <LiveScannerCamera
+        visible={showLiveCamera}
+        onClose={() => setShowLiveCamera(false)}
+        onFinishCapture={handleFinishLiveCamera}
+        primaryColor={primaryColor}
+      />
     </View>
   );
 };
