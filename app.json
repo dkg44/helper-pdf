@@ -9,7 +9,7 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.dkwork.helperpdf",
+      "bundleIdentifier": "com.helperpdf.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSCameraUsageDescription": "Helper PDF: Reader & Scanner needs camera access to scan paper documents and convert them to PDF.",
@@ -24,7 +24,7 @@
         "foregroundImage": "./src/assets/adaptive_icon.png",
         "backgroundColor": "#6366f1"
       },
-      "package": "com.dkwork.helperpdf",
+      "package": "com.helperpdf.app",
       "versionCode": 1,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
