@@ -37,19 +37,7 @@ export const AcrobatBottomNav: React.FC<AcrobatBottomNavProps> = ({
     {
       tab: 'scan',
       label: 'Scan',
-      icon: (active) => (
-        <View
-          style={[
-            styles.scanCircle,
-            {
-              backgroundColor: active ? primaryColor : (isDark ? '#1e293b' : '#f1f5f9'),
-              borderColor: active ? primaryColor : border,
-            },
-          ]}
-        >
-          <ScanLine size={20} color={active ? '#ffffff' : (isDark ? '#e2e8f0' : '#334155')} />
-        </View>
-      ),
+      icon: (active) => <ScanLine size={22} color={active ? primaryColor : inactiveColor} />,
     },
     {
       tab: 'tools',
@@ -78,7 +66,9 @@ export const AcrobatBottomNav: React.FC<AcrobatBottomNavProps> = ({
             style={styles.tabBtn}
             activeOpacity={0.7}
           >
-            {item.icon(isActive)}
+            <View style={styles.iconSlot}>
+              {item.icon(isActive)}
+            </View>
             <Text
               style={[
                 styles.tabLabel,
@@ -90,9 +80,12 @@ export const AcrobatBottomNav: React.FC<AcrobatBottomNavProps> = ({
             >
               {item.label}
             </Text>
-            {isActive && item.tab !== 'scan' && (
-              <View style={[styles.activeDot, { backgroundColor: primaryColor }]} />
-            )}
+            <View
+              style={[
+                styles.activeDot,
+                { backgroundColor: isActive ? primaryColor : 'transparent' },
+              ]}
+            />
           </TouchableOpacity>
         );
       })}
@@ -106,7 +99,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-around',
     borderTopWidth: 1,
-    paddingTop: 8,
+    paddingTop: 6,
     position: 'absolute',
     bottom: 0,
     left: 0,
@@ -120,13 +113,18 @@ const styles = StyleSheet.create({
   },
   tabBtn: {
     flex: 1,
+    height: 50,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 4,
+  },
+  iconSlot: {
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   tabLabel: {
     fontSize: 10.5,
-    marginTop: 4,
+    marginTop: 2,
     letterSpacing: 0.2,
   },
   activeDot: {
@@ -134,14 +132,5 @@ const styles = StyleSheet.create({
     height: 4,
     borderRadius: 2,
     marginTop: 2,
-  },
-  scanCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    borderWidth: 1.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: -4,
   },
 });

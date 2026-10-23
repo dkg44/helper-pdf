@@ -17,6 +17,7 @@ import {
   Zap,
   Minimize2,
   RefreshCw,
+  Sparkles,
 } from 'lucide-react-native';
 import { ImageConvertMode } from './ImageConverterModal';
 import { DocxMode } from './DocxConverterModal';
@@ -29,6 +30,7 @@ interface ConverterHubProps {
   onOpenTextToPdf: () => void;
   onOpenImageConverter: (mode: ImageConvertMode) => void;
   onOpenDocxConverter: (mode: DocxMode) => void;
+  onOpenCompressPdf: () => void;
   onOpenDrive?: () => void;
   onOpenPdfToText?: () => void;
   onPickDocument: () => void;
@@ -42,6 +44,7 @@ export const ConverterHub: React.FC<ConverterHubProps> = ({
   onOpenTextToPdf,
   onOpenImageConverter,
   onOpenDocxConverter,
+  onOpenCompressPdf,
   onOpenDrive,
   onOpenPdfToText,
   onPickDocument,
@@ -55,7 +58,7 @@ export const ConverterHub: React.FC<ConverterHubProps> = ({
     <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
       {/* ── 1. POPULAR QUICK ACTIONS ────────────────────────── */}
       <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { color: mutedColor }]}>🔥 POPULAR CONVERTERS</Text>
+        <Text style={[styles.sectionTitle, { color: mutedColor }]}>🔥 POPULAR CONVERTERS & TOOLS</Text>
         <View style={styles.quickGrid}>
           {/* PDF to Word */}
           <TouchableOpacity
@@ -83,6 +86,19 @@ export const ConverterHub: React.FC<ConverterHubProps> = ({
             <Text style={[styles.quickCardSub, { color: mutedColor }]}>DOCX to PDF</Text>
           </TouchableOpacity>
 
+          {/* Compress PDF (Reduce Size) */}
+          <TouchableOpacity
+            onPress={onOpenCompressPdf}
+            style={[styles.quickCard, { backgroundColor: '#dc262612', borderColor: '#dc262630' }]}
+            activeOpacity={0.75}
+          >
+            <View style={[styles.quickIconCircle, { backgroundColor: '#dc2626' }]}>
+              <Minimize2 size={20} color="#ffffff" />
+            </View>
+            <Text style={[styles.quickCardTitle, { color: textColor }]}>Compress PDF</Text>
+            <Text style={[styles.quickCardSub, { color: mutedColor }]}>Reduce MB size</Text>
+          </TouchableOpacity>
+
           {/* JPG to PNG */}
           <TouchableOpacity
             onPress={() => onOpenImageConverter('jpg_to_png')}
@@ -96,6 +112,19 @@ export const ConverterHub: React.FC<ConverterHubProps> = ({
             <Text style={[styles.quickCardSub, { color: mutedColor }]}>Lossless format</Text>
           </TouchableOpacity>
 
+          {/* Compress & Resize Image */}
+          <TouchableOpacity
+            onPress={() => onOpenImageConverter('compress')}
+            style={[styles.quickCard, { backgroundColor: '#10b98112', borderColor: '#10b98130' }]}
+            activeOpacity={0.75}
+          >
+            <View style={[styles.quickIconCircle, { backgroundColor: '#10b981' }]}>
+              <RefreshCw size={20} color="#ffffff" />
+            </View>
+            <Text style={[styles.quickCardTitle, { color: textColor }]}>Resize Image</Text>
+            <Text style={[styles.quickCardSub, { color: mutedColor }]}>Shrink KB / MB</Text>
+          </TouchableOpacity>
+
           {/* Clear Scanner */}
           <TouchableOpacity
             onPress={onOpenScanner}
@@ -106,15 +135,33 @@ export const ConverterHub: React.FC<ConverterHubProps> = ({
               <ScanLine size={20} color="#ffffff" />
             </View>
             <Text style={[styles.quickCardTitle, { color: textColor }]}>Clear Scan</Text>
-            <Text style={[styles.quickCardSub, { color: mutedColor }]}>Contrast camera</Text>
+            <Text style={[styles.quickCardSub, { color: mutedColor }]}>Batch & auto-crop</Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* ── 2. DOCUMENT & PDF CONVERTERS ───────────────────── */}
+      {/* ── 2. DOCUMENT & PDF CONVERTERS & SIZE REDUCERS ─── */}
       <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { color: mutedColor }]}>📄 DOCUMENT & PDF CONVERTERS</Text>
+        <Text style={[styles.sectionTitle, { color: mutedColor }]}>📄 DOCUMENT CONVERTERS & SIZE REDUCERS</Text>
         <View style={styles.listCardGroup}>
+          {/* Compress PDF */}
+          <TouchableOpacity
+            onPress={onOpenCompressPdf}
+            style={[styles.rowItem, { backgroundColor: cardBg, borderColor: border }]}
+            activeOpacity={0.75}
+          >
+            <View style={[styles.itemIconBox, { backgroundColor: '#dc262618' }]}>
+              <Minimize2 size={20} color="#dc2626" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.itemTitle, { color: textColor }]}>Compress & Reduce PDF Size</Text>
+              <Text style={[styles.itemDesc, { color: mutedColor }]}>
+                Shrink MB size for government portals, job applications & email
+              </Text>
+            </View>
+            <ChevronRight size={18} color={mutedColor} />
+          </TouchableOpacity>
+
           {/* PDF to Word */}
           <TouchableOpacity
             onPress={() => onOpenDocxConverter('pdf_to_docx')}
@@ -179,9 +226,9 @@ export const ConverterHub: React.FC<ConverterHubProps> = ({
               <FilePlus size={20} color="#8b5cf6" />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.itemTitle, { color: textColor }]}>Images to PDF (Batch)</Text>
+              <Text style={[styles.itemTitle, { color: textColor }]}>Images to PDF (Batch Scan)</Text>
               <Text style={[styles.itemDesc, { color: mutedColor }]}>
-                Combine multiple gallery photos into a single PDF
+                Combine and enhance multiple photos into a single PDF
               </Text>
             </View>
             <ChevronRight size={18} color={mutedColor} />
@@ -209,10 +256,28 @@ export const ConverterHub: React.FC<ConverterHubProps> = ({
         </View>
       </View>
 
-      {/* ── 3. IMAGE & MEDIA CONVERTERS ────────────────────── */}
+      {/* ── 3. IMAGE & MEDIA CONVERTERS & RESIZERS ─────────── */}
       <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { color: mutedColor }]}>🖼️ IMAGE & MEDIA CONVERTERS</Text>
+        <Text style={[styles.sectionTitle, { color: mutedColor }]}>🖼️ IMAGE CONVERTERS & RESIZERS</Text>
         <View style={styles.listCardGroup}>
+          {/* Compress & Resize Image */}
+          <TouchableOpacity
+            onPress={() => onOpenImageConverter('compress')}
+            style={[styles.rowItem, { backgroundColor: cardBg, borderColor: border }]}
+            activeOpacity={0.75}
+          >
+            <View style={[styles.itemIconBox, { backgroundColor: '#10b98118' }]}>
+              <Minimize2 size={20} color="#10b981" />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.itemTitle, { color: textColor }]}>Compress & Resize Image</Text>
+              <Text style={[styles.itemDesc, { color: mutedColor }]}>
+                Reduce MB size and scale dimensions (25%, 50%, 75%)
+              </Text>
+            </View>
+            <ChevronRight size={18} color={mutedColor} />
+          </TouchableOpacity>
+
           {/* JPG to PNG */}
           <TouchableOpacity
             onPress={() => onOpenImageConverter('jpg_to_png')}
@@ -244,24 +309,6 @@ export const ConverterHub: React.FC<ConverterHubProps> = ({
               <Text style={[styles.itemTitle, { color: textColor }]}>PNG to JPG Converter</Text>
               <Text style={[styles.itemDesc, { color: mutedColor }]}>
                 Convert PNG to standard JPEG with quality optimizer
-              </Text>
-            </View>
-            <ChevronRight size={18} color={mutedColor} />
-          </TouchableOpacity>
-
-          {/* Compress & Resize */}
-          <TouchableOpacity
-            onPress={() => onOpenImageConverter('compress')}
-            style={[styles.rowItem, { backgroundColor: cardBg, borderColor: border }]}
-            activeOpacity={0.75}
-          >
-            <View style={[styles.itemIconBox, { backgroundColor: '#10b98118' }]}>
-              <Minimize2 size={20} color="#10b981" />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.itemTitle, { color: textColor }]}>Compress & Resize Image</Text>
-              <Text style={[styles.itemDesc, { color: mutedColor }]}>
-                Shrink MB size for government portals, job applications & email
               </Text>
             </View>
             <ChevronRight size={18} color={mutedColor} />

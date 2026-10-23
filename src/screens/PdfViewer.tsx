@@ -53,6 +53,7 @@ import { ImageConverterModal, ImageConvertMode } from '../components/ImageConver
 import { DocxConverterModal, DocxMode } from '../components/DocxConverterModal';
 import { TextToPdfModal } from '../components/TextToPdfModal';
 import { PdfToTextModal } from '../components/PdfToTextModal';
+import { CompressPdfModal } from '../components/CompressPdfModal';
 // ---------------------------------------------------------------------------
 // Types & Constants
 // ---------------------------------------------------------------------------
@@ -5553,6 +5554,7 @@ function EmptyState({
   const [showDocxModal, setShowDocxModal] = useState(false);
   const [docxModalMode, setDocxModalMode] = useState<DocxMode>('pdf_to_docx');
   const [showTextToPdfModal, setShowTextToPdfModal] = useState(false);
+  const [showCompressPdfModal, setShowCompressPdfModal] = useState(false);
 
   // 1-click theme button icons & labels
   const themeNextIcon: Record<string, React.ReactNode> = {
@@ -6099,6 +6101,7 @@ function EmptyState({
                 setDocxModalMode(mode);
                 setShowDocxModal(true);
               }}
+              onOpenCompressPdf={() => setShowCompressPdfModal(true)}
               onOpenDrive={onOpenDrive}
               onPickDocument={onPick}
             />
@@ -6140,6 +6143,18 @@ function EmptyState({
       <TextToPdfModal
         visible={showTextToPdfModal}
         onClose={() => setShowTextToPdfModal(false)}
+        onOpenPdf={async (uri, name) => {
+          if (onOpenScannedPdf) {
+            await onOpenScannedPdf(uri, name);
+          }
+        }}
+        primaryColor={primary}
+        isDark={isDark}
+      />
+
+      <CompressPdfModal
+        visible={showCompressPdfModal}
+        onClose={() => setShowCompressPdfModal(false)}
         onOpenPdf={async (uri, name) => {
           if (onOpenScannedPdf) {
             await onOpenScannedPdf(uri, name);
