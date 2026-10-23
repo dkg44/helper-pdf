@@ -29,6 +29,7 @@ import * as Speech from 'expo-speech';
 import * as Clipboard from 'expo-clipboard';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WebView } from 'react-native-webview';
+const WebViewAny = WebView as any;
 import {
   FolderOpen, Play, Pause, Square, Volume2, ChevronLeft, ChevronRight,
   Eye, Volume1, ArrowLeft, SkipBack, SkipForward, FileText, Coffee,
@@ -2977,8 +2978,9 @@ export default function StandalonePdfReader({
 
   // Screen dimensions — listen for rotation, then tell the WebView to re-render pages at new width
   useEffect(() => {
-    const sub = Dimensions.addEventListener('change', ({ window: win }) => {
-      setScreenDims(win);
+    const sub = Dimensions.addEventListener('change', (dims: any) => {
+      const win = dims.window;
+      setScreenDims(win as any);
       // Give the WebView layout time to settle before asking pdf.js to resize
       setTimeout(() => {
         sendCmd({ action: 'RESIZE' });
@@ -3132,33 +3134,16 @@ export default function StandalonePdfReader({
     sendCmd({ action: 'GET_PAGE_IMAGE', page });
   };
 
-  const performAiOcrRequest = async (page: number, imageBase64: string) => {
-    try {
-      setLoadProgress('AI is extracting text\u2026');
-      const response = await api.post(
-        '/auth/ai-ocr',
-        { image: imageBase64 },
-        { signal: abortControllerRef.current?.signal }
-      );
-      if (response.data && response.data.success && response.data.text) {
-        setExtractedPages(prev => ({ ...prev, [page]: response.data.text }));
-        Alert.alert('Success', 'AI extracted page text successfully!');
-      } else {
-        Alert.alert('Failed', 'AI returned no text.');
-      }
-    } catch (err: any) {
-      if (err?.name === 'CanceledError' || err?.message === 'canceled') {
-        console.log('AI OCR request was aborted by the user.');
-        return;
-      }
-      console.warn('AI OCR Error:', err);
-      Alert.alert('AI OCR Error', err?.response?.data?.error || err.message || 'Failed to extract text with AI.');
-    } finally {
-      setAiLoading(false);
-    }
+  const performAiOcrRequest = async (page: number, _imageBase64: string) => {
+    // Standalone mode: AI OCR requires a server. Not available here.
+    setAiLoading(false);
+    Alert.alert(
+      'AI OCR Unavailable',
+      'AI text extraction is not available in the standalone PDF Reader. Use the built-in text copy feature instead.'
+    );
   };
 
-  const renderOutlineItems = (items: OutlineItem[], level: number = 0) => {
+    const renderOutlineItems = (items: OutlineItem[], level: number = 0) => {
     return items.map((item, idx) => (
       <View key={`${level}-${idx}-${item.title}`}>
         <TouchableOpacity
@@ -4281,7 +4266,7 @@ export default function StandalonePdfReader({
                 title="PDF Reader"
               />
             ) : (
-              <WebView
+              <WebViewAny
                 ref={webViewRef}
                 style={{ flex: 1, backgroundColor: rBg }}
                 source={{ html: viewerHtml }}
