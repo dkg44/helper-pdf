@@ -27,7 +27,7 @@ import {
   Layers,
   FileText,
 } from 'lucide-react-native';
-import { ScannedPage, detectEarlyCrop, NO_CROP } from '../services/scannerService';
+import { ScannedPage, detectEarlyCrop, detectEarlyCorners, NO_CROP } from '../services/scannerService';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -122,6 +122,7 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
 
       if (photo?.uri) {
         const earlyCrop = detectEarlyCrop(photo.width, photo.height);
+        const earlyCorners = detectEarlyCorners(photo.width, photo.height);
         const newPage: ScannedPage = {
           id: `scan_${Date.now()}_${capturedPages.length}`,
           uri: photo.uri,
@@ -129,6 +130,7 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
           rotation: 0,
           filter: 'doc',
           crop: earlyCrop,
+          corners: earlyCorners,
           width: photo.width,
           height: photo.height,
         };
@@ -167,6 +169,7 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
           rotation: 0,
           filter: 'doc',
           crop: detectEarlyCrop(asset.width, asset.height),
+          corners: detectEarlyCorners(asset.width, asset.height),
           width: asset.width,
           height: asset.height,
         }));

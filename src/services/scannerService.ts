@@ -6,6 +6,18 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type ScanFilterType = 'orig' | 'doc' | 'color' | 'bw';
 
+export interface CornerPoint {
+  x: number; // 0 to 100 percentage
+  y: number; // 0 to 100 percentage
+}
+
+export interface QuadCorners {
+  tl: CornerPoint;
+  tr: CornerPoint;
+  br: CornerPoint;
+  bl: CornerPoint;
+}
+
 export interface PageCrop {
   topPercent: number;    // 0 to 40%
   bottomPercent: number; // 0 to 40%
@@ -20,6 +32,7 @@ export interface ScannedPage {
   rotation: number;
   filter: ScanFilterType;
   crop: PageCrop;
+  corners?: QuadCorners;
   width?: number;
   height?: number;
 }
@@ -39,10 +52,25 @@ export interface SavedScanDoc {
   folderId: string | null; // null = root / unfiled
   createdAt: number;
   fileSize?: number;
+  pages?: ScannedPage[];
 }
 
 const STORAGE_KEY_FOLDERS = '@clear_scanner_folders_v2';
 const STORAGE_KEY_DOCS = '@clear_scanner_docs_v2';
+
+export const DEFAULT_QUAD_CORNERS: QuadCorners = {
+  tl: { x: 5, y: 5 },
+  tr: { x: 95, y: 5 },
+  br: { x: 95, y: 95 },
+  bl: { x: 5, y: 95 },
+};
+
+export const NO_QUAD_CORNERS: QuadCorners = {
+  tl: { x: 0, y: 0 },
+  tr: { x: 100, y: 0 },
+  br: { x: 100, y: 100 },
+  bl: { x: 0, y: 100 },
+};
 
 export const DEFAULT_AUTO_CROP: PageCrop = {
   topPercent: 5,
@@ -71,6 +99,15 @@ export const detectEarlyCrop = (_width?: number, _height?: number): PageCrop => 
   };
 };
 
+export const detectEarlyCorners = (_width?: number, _height?: number): QuadCorners => {
+  return {
+    tl: { x: 5, y: 5 },
+    tr: { x: 95, y: 5 },
+    br: { x: 95, y: 95 },
+    bl: { x: 5, y: 95 },
+  };
+};
+
 /**
  * Capture single page using native camera with early auto crop deducted
  */
@@ -91,6 +128,7 @@ export const capturePageWithCamera = async (currentFilter: ScanFilterType = 'doc
 
   const asset = result.assets[0];
   const earlyCrop = detectEarlyCrop(asset.width, asset.height);
+  const earlyCorners = detectEarlyCorners(asset.width, asset.height);
 
   return {
     id: 'scan_' + Date.now(),
@@ -99,6 +137,7 @@ export const capturePageWithCamera = async (currentFilter: ScanFilterType = 'doc
     rotation: 0,
     filter: currentFilter,
     crop: earlyCrop,
+    corners: earlyCorners,
     width: asset.width,
     height: asset.height,
   };
@@ -129,6 +168,7 @@ export const importPagesFromGallery = async (currentFilter: ScanFilterType = 'do
     rotation: 0,
     filter: currentFilter,
     crop: detectEarlyCrop(asset.width, asset.height),
+    corners: detectEarlyCorners(asset.width, asset.height),
     width: asset.width,
     height: asset.height,
   }));

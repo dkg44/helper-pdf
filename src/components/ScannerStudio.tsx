@@ -13,8 +13,8 @@ import {
   Modal,
   Platform,
   PanResponder,
-  SafeAreaView,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   Camera,
   RotateCw,
@@ -56,8 +56,13 @@ import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Svg, Polygon, Path, Line, Circle } from 'react-native-svg';
 import { WebView } from 'react-native-webview';
 import { LiveScannerCamera } from './LiveScannerCamera';
+import { PerspectiveWarpBridge, PerspectiveWarpBridgeRef } from '../services/perspectiveService';
+
+const WebViewAny = WebView as any;
 
 import {
   ScannedPage,
@@ -65,6 +70,11 @@ import {
   PageCrop,
   DEFAULT_AUTO_CROP,
   NO_CROP,
+  CornerPoint,
+  QuadCorners,
+  DEFAULT_QUAD_CORNERS,
+  NO_QUAD_CORNERS,
+  detectEarlyCorners,
   ScannedFolder,
   SavedScanDoc,
   capturePageWithCamera,
@@ -107,6 +117,8 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [sortMode, setSortMode] = useState<SortMode>('date_desc');
 
+  const STORAGE_KEY_VIEW_MODE = '@scanner_view_mode_v2';
+
   // Search state
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -146,16 +158,30 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   // Layout size for draggable crop canvas
   const [cropLayout, setCropLayout] = useState({ width: SCREEN_W - 32, height: SCREEN_H * 0.58 });
 
+  // WebGL & Hardware-accelerated Perspective Warping Bridge
+  const warpBridgeRef = useRef<PerspectiveWarpBridgeRef>(null);
+
   const bg = isDark ? '#0b1120' : '#f8fafc';
   const cardBg = isDark ? 'rgba(255,255,255,0.04)' : '#ffffff';
   const border = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
   const textColor = isDark ? '#f8fafc' : '#0f172a';
   const mutedColor = isDark ? '#94a3b8' : '#64748b';
 
-  // Load saved folders and docs on mount
+  // Load saved folders, docs, and viewMode on mount
   useEffect(() => {
     loadFoldersAndDocs();
+    AsyncStorage.getItem(STORAGE_KEY_VIEW_MODE).then((v: string | null) => {
+      if (v === 'grid' || v === 'list') {
+        setViewMode(v);
+      }
+    });
   }, []);
+
+  const toggleViewMode = async () => {
+    const next: ViewMode = viewMode === 'grid' ? 'list' : 'grid';
+    setViewMode(next);
+    await AsyncStorage.setItem(STORAGE_KEY_VIEW_MODE, next);
+  };
 
   const loadFoldersAndDocs = async () => {
     const loadedFolders = await loadScannerFolders();
@@ -185,97 +211,119 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     return result;
   }, [savedDocs, selectedFolderId, searchQuery, sortMode]);
 
-  // ── Drag & Resize Crop Logic with PanResponder ──────────────
-  const cropRef = useRef<PageCrop>(selectedPage?.crop || DEFAULT_AUTO_CROP);
+  // ── Drag & Resize 4-Corner Crop Logic with PanResponder ──────
+  const cornersRef = useRef<QuadCorners>(selectedPage?.corners || DEFAULT_QUAD_CORNERS);
   useEffect(() => {
-    if (selectedPage?.crop) {
-      cropRef.current = selectedPage.crop;
+    if (selectedPage?.corners) {
+      cornersRef.current = selectedPage.corners;
     }
-  }, [selectedPage?.crop]);
+  }, [selectedPage?.corners]);
 
-  const updateCrop = (newCrop: PageCrop) => {
-    cropRef.current = newCrop;
+  const updateCorners = (newCorners: QuadCorners) => {
+    cornersRef.current = newCorners;
     setPages((prev) =>
-      prev.map((p, i) => (i === selectedIdx ? { ...p, crop: newCrop } : p))
+      prev.map((p, i) => (i === selectedIdx ? { ...p, corners: newCorners } : p))
     );
   };
 
-  // Draggable PanResponder for Top-Left Corner
+  // Accurate containment geometry of the image inside cropLayout
+  const renderedImgRect = useMemo(() => {
+    if (!selectedPage) return { width: 300, height: 400, left: 0, top: 0 };
+    const isRotated90 = (selectedPage.rotation || 0) % 180 !== 0;
+    const rawW = selectedPage.width || 3;
+    const rawH = selectedPage.height || 4;
+    const imgW = isRotated90 ? rawH : rawW;
+    const imgH = isRotated90 ? rawW : rawH;
+    const imgAspect = imgW / imgH;
+    const canvasAspect = (cropLayout.width || 300) / (cropLayout.height || 400);
+
+    let renderW = cropLayout.width || 300;
+    let renderH = cropLayout.height || 400;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (canvasAspect > imgAspect) {
+      renderH = cropLayout.height || 400;
+      renderW = renderH * imgAspect;
+      offsetX = ((cropLayout.width || 300) - renderW) / 2;
+    } else {
+      renderW = cropLayout.width || 300;
+      renderH = renderW / imgAspect;
+      offsetY = ((cropLayout.height || 400) - renderH) / 2;
+    }
+
+    return { width: renderW, height: renderH, left: offsetX, top: offsetY };
+  }, [selectedPage, cropLayout]);
+
+  // 4 Independent PanResponders with direct 1:1 finger tracking
+  const tlStart = useRef<CornerPoint>({ x: 5, y: 5 });
   const panTL = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        const W = cropLayout.width || 300;
-        const H = cropLayout.height || 400;
-        const dXPct = (gestureState.dx / W) * 100;
-        const dYPct = (gestureState.dy / H) * 100;
-
-        const current = cropRef.current;
-        const newLeft = Math.max(0, Math.min(42, current.leftPercent + dXPct * 0.08));
-        const newTop = Math.max(0, Math.min(42, current.topPercent + dYPct * 0.08));
-
-        updateCrop({ ...current, leftPercent: newLeft, topPercent: newTop });
+      onPanResponderGrant: () => {
+        tlStart.current = { ...(cornersRef.current?.tl || { x: 5, y: 5 }) };
+      },
+      onPanResponderMove: (_, gs) => {
+        const W = renderedImgRect.width || 300;
+        const H = renderedImgRect.height || 400;
+        const newX = Math.max(0, Math.min(95, Math.round(tlStart.current.x + (gs.dx / W) * 100)));
+        const newY = Math.max(0, Math.min(95, Math.round(tlStart.current.y + (gs.dy / H) * 100)));
+        updateCorners({ ...cornersRef.current, tl: { x: newX, y: newY } });
       },
     })
   ).current;
 
-  // Draggable PanResponder for Top-Right Corner
+  const trStart = useRef<CornerPoint>({ x: 95, y: 5 });
   const panTR = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        const W = cropLayout.width || 300;
-        const H = cropLayout.height || 400;
-        const dXPct = (gestureState.dx / W) * 100;
-        const dYPct = (gestureState.dy / H) * 100;
-
-        const current = cropRef.current;
-        const newRight = Math.max(0, Math.min(42, current.rightPercent - dXPct * 0.08));
-        const newTop = Math.max(0, Math.min(42, current.topPercent + dYPct * 0.08));
-
-        updateCrop({ ...current, rightPercent: newRight, topPercent: newTop });
+      onPanResponderGrant: () => {
+        trStart.current = { ...(cornersRef.current?.tr || { x: 95, y: 5 }) };
+      },
+      onPanResponderMove: (_, gs) => {
+        const W = renderedImgRect.width || 300;
+        const H = renderedImgRect.height || 400;
+        const newX = Math.max(5, Math.min(100, Math.round(trStart.current.x + (gs.dx / W) * 100)));
+        const newY = Math.max(0, Math.min(95, Math.round(trStart.current.y + (gs.dy / H) * 100)));
+        updateCorners({ ...cornersRef.current, tr: { x: newX, y: newY } });
       },
     })
   ).current;
 
-  // Draggable PanResponder for Bottom-Left Corner
+  const blStart = useRef<CornerPoint>({ x: 5, y: 95 });
   const panBL = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        const W = cropLayout.width || 300;
-        const H = cropLayout.height || 400;
-        const dXPct = (gestureState.dx / W) * 100;
-        const dYPct = (gestureState.dy / H) * 100;
-
-        const current = cropRef.current;
-        const newLeft = Math.max(0, Math.min(42, current.leftPercent + dXPct * 0.08));
-        const newBottom = Math.max(0, Math.min(42, current.bottomPercent - dYPct * 0.08));
-
-        updateCrop({ ...current, leftPercent: newLeft, bottomPercent: newBottom });
+      onPanResponderGrant: () => {
+        blStart.current = { ...(cornersRef.current?.bl || { x: 5, y: 95 }) };
+      },
+      onPanResponderMove: (_, gs) => {
+        const W = renderedImgRect.width || 300;
+        const H = renderedImgRect.height || 400;
+        const newX = Math.max(0, Math.min(95, Math.round(blStart.current.x + (gs.dx / W) * 100)));
+        const newY = Math.max(5, Math.min(100, Math.round(blStart.current.y + (gs.dy / H) * 100)));
+        updateCorners({ ...cornersRef.current, bl: { x: newX, y: newY } });
       },
     })
   ).current;
 
-  // Draggable PanResponder for Bottom-Right Corner
+  const brStart = useRef<CornerPoint>({ x: 95, y: 95 });
   const panBR = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderMove: (_, gestureState) => {
-        const W = cropLayout.width || 300;
-        const H = cropLayout.height || 400;
-        const dXPct = (gestureState.dx / W) * 100;
-        const dYPct = (gestureState.dy / H) * 100;
-
-        const current = cropRef.current;
-        const newRight = Math.max(0, Math.min(42, current.rightPercent - dXPct * 0.08));
-        const newBottom = Math.max(0, Math.min(42, current.bottomPercent - dYPct * 0.08));
-
-        updateCrop({ ...current, rightPercent: newRight, bottomPercent: newBottom });
+      onPanResponderGrant: () => {
+        brStart.current = { ...(cornersRef.current?.br || { x: 95, y: 95 }) };
+      },
+      onPanResponderMove: (_, gs) => {
+        const W = renderedImgRect.width || 300;
+        const H = renderedImgRect.height || 400;
+        const newX = Math.max(5, Math.min(100, Math.round(brStart.current.x + (gs.dx / W) * 100)));
+        const newY = Math.max(5, Math.min(100, Math.round(brStart.current.y + (gs.dy / H) * 100)));
+        updateCorners({ ...cornersRef.current, br: { x: newX, y: newY } });
       },
     })
   ).current;
@@ -305,12 +353,16 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     try {
       const imported = await importPagesFromGallery(currentFilter);
       if (imported.length > 0) {
-        setPages(imported);
-        setSelectedIdx(0);
-        const now = new Date();
-        const autoName = `Scan_${now.getMonth() + 1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
-        setDocTitle(autoName);
-        setStage('border_adjust');
+        if (stage === 'doc_detail') {
+          setPages((prev) => [...prev, ...imported]);
+        } else {
+          setPages(imported);
+          setSelectedIdx(0);
+          const now = new Date();
+          const autoName = `Scan_${now.getMonth() + 1}${now.getDate()}_${now.getHours()}${now.getMinutes()}`;
+          setDocTitle(autoName);
+          setStage('border_adjust');
+        }
       }
     } catch (e: any) {
       Alert.alert('Gallery', e?.message || 'Could not import images.');
@@ -326,10 +378,14 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const file = result.assets[0];
+        const cleanName = file.name.replace(/\.pdf$/i, '');
+        const destUri = `${FileSystem.documentDirectory}${Date.now()}_${file.name}`;
+        await FileSystem.copyAsync({ from: file.uri, to: destUri });
+
         const newDoc: SavedScanDoc = {
           id: `doc_${Date.now()}`,
-          title: file.name.replace(/\.pdf$/i, ''),
-          pdfUri: file.uri,
+          title: cleanName,
+          pdfUri: destUri,
           pageCount: 1,
           thumbnailUri: '',
           folderId: selectedFolderId,
@@ -338,7 +394,14 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
         };
         await addSavedScanDoc(newDoc);
         await loadFoldersAndDocs();
-        Alert.alert('PDF Imported', `Added "${file.name}" to your scanner library.`);
+        Alert.alert(
+          'PDF Imported',
+          `"${file.name}" has been added to ${selectedFolderId ? 'this folder' : 'your library'}. Would you like to open it now?`,
+          [
+            { text: 'Later', style: 'cancel' },
+            { text: 'Open Now', onPress: () => onOpenPdf(destUri, `${cleanName}.pdf`) },
+          ]
+        );
       }
     } catch (e: any) {
       Alert.alert('Import Failed', e?.message || 'Could not import PDF.');
@@ -379,12 +442,12 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   // ── Step 1: Border Adjust Actions ───────────────────────────
   const handleAutoDetectCorner = () => {
     if (!selectedPage) return;
-    const early = detectEarlyCrop(selectedPage.width, selectedPage.height);
-    updateCrop(early);
+    const early = detectEarlyCorners(selectedPage.width, selectedPage.height);
+    updateCorners(early);
   };
 
   const handleFullPhotoCrop = () => {
-    updateCrop({ ...NO_CROP });
+    updateCorners({ ...NO_QUAD_CORNERS });
   };
 
   const handleRotateCurrent = () => {
@@ -394,16 +457,36 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     );
   };
 
-  // Proceed to Step 2 (Filters)
+  // Proceed to Step 2 (Filters) with True 4-Corner Perspective Warping Rectification
   const handleProceedToFilters = async () => {
     if (!pages.length) return;
     setIsProcessing(true);
     try {
-      const croppedPages = await Promise.all(pages.map((p) => applyCropToPage(p)));
-      setPages(croppedPages);
+      const warpedPages = await Promise.all(
+        pages.map(async (p) => {
+          try {
+            const corners = p.corners || DEFAULT_QUAD_CORNERS;
+            const res = await warpBridgeRef.current?.warpImage(p.originalUri || p.uri, corners, p.rotation);
+            if (res && res.uri) {
+              return {
+                ...p,
+                uri: res.uri,
+                width: res.width,
+                height: res.height,
+                rotation: 0,
+              };
+            }
+            return applyCropToPage(p);
+          } catch (err) {
+            console.warn('Perspective warp error on page, falling back:', err);
+            return applyCropToPage(p);
+          }
+        })
+      );
+      setPages(warpedPages);
       setStage('filter_enhance');
     } catch (e: any) {
-      Alert.alert('Processing', e?.message || 'Failed to crop document.');
+      Alert.alert('Processing', e?.message || 'Failed to rectify and crop document.');
     } finally {
       setIsProcessing(false);
     }
@@ -416,14 +499,15 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     try {
       const result = await compileScannedPagesToPdf(pages, docTitle);
       const newSavedDoc: SavedScanDoc = {
-        id: `doc_${Date.now()}`,
+        id: currentDoc ? currentDoc.id : `doc_${Date.now()}`,
         title: docTitle.trim() || result.name.replace(/\.pdf$/i, ''),
         pdfUri: result.uri,
         pageCount: pages.length,
         thumbnailUri: pages[0]?.uri || '',
-        folderId: selectedFolderId,
-        createdAt: Date.now(),
+        folderId: currentDoc?.folderId ?? selectedFolderId,
+        createdAt: currentDoc?.createdAt ?? Date.now(),
         fileSize: result.size,
+        pages: pages,
       };
 
       await addSavedScanDoc(newSavedDoc);
@@ -437,13 +521,72 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     }
   };
 
-  // ── Document Operations (Share, Rename, Delete, Move) ───────
+  // ── Document Operations (Share, Rename, Delete, Move, Open Detail) ───────
+  const handleOpenDocDetail = (doc: SavedScanDoc) => {
+    setCurrentDoc(doc);
+    setDocTitle(doc.title);
+    if (doc.pages && doc.pages.length > 0) {
+      setPages(doc.pages);
+    } else {
+      const initialPages: ScannedPage[] = [
+        {
+          id: `page_${doc.id}_1`,
+          uri: doc.thumbnailUri || doc.pdfUri,
+          originalUri: doc.thumbnailUri || doc.pdfUri,
+          rotation: 0,
+          corners: { ...DEFAULT_QUAD_CORNERS },
+          crop: { ...DEFAULT_AUTO_CROP },
+          filter: 'doc',
+        },
+      ];
+      setPages(initialPages);
+    }
+    setSelectedIdx(0);
+    setStage('doc_detail');
+  };
+
+  const handleOpenPdfWithLatestChanges = async () => {
+    if (!pages.length) {
+      Alert.alert('No Pages', 'The document has no pages.');
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      const result = await compileScannedPagesToPdf(pages, currentDoc?.title || docTitle);
+      const updatedDoc: SavedScanDoc = {
+        id: currentDoc ? currentDoc.id : `doc_${Date.now()}`,
+        title: (currentDoc?.title || docTitle).trim() || result.name.replace(/\.pdf$/i, ''),
+        pdfUri: result.uri,
+        pageCount: pages.length,
+        thumbnailUri: pages[0]?.uri || '',
+        folderId: currentDoc?.folderId ?? selectedFolderId,
+        createdAt: currentDoc?.createdAt ?? Date.now(),
+        fileSize: result.size,
+        pages: pages,
+      };
+      await addSavedScanDoc(updatedDoc);
+      await loadFoldersAndDocs();
+      setCurrentDoc(updatedDoc);
+      onOpenPdf(updatedDoc.pdfUri, `${updatedDoc.title}.pdf`);
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Could not compile and open PDF.');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const handleShareDoc = async (doc: SavedScanDoc) => {
     try {
+      const info = await FileSystem.getInfoAsync(doc.pdfUri);
+      if (!info.exists) {
+        Alert.alert('File Not Found', 'The scanned PDF could not be found at its storage path.');
+        return;
+      }
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(doc.pdfUri, {
           mimeType: 'application/pdf',
           dialogTitle: `Share ${doc.title}`,
+          UTI: 'com.adobe.pdf',
         });
       } else {
         Alert.alert('Sharing Unavailable', 'File sharing is not supported on this device.');
@@ -503,6 +646,30 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     }
   };
 
+  // ── Base64 Preview Generator for 100% Reliable WebView Rendering ────
+  const [filterPreviewBase64, setFilterPreviewBase64] = useState<string>('');
+
+  useEffect(() => {
+    let isMounted = true;
+    if (!selectedPage?.uri) {
+      setFilterPreviewBase64('');
+      return;
+    }
+    (async () => {
+      try {
+        const b64 = await FileSystem.readAsStringAsync(selectedPage.uri, { encoding: 'base64' });
+        if (isMounted) {
+          setFilterPreviewBase64(`data:image/jpeg;base64,${b64}`);
+        }
+      } catch (err) {
+        if (isMounted) setFilterPreviewBase64(selectedPage.uri);
+      }
+    })();
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedPage?.uri]);
+
   // ── HTML Preview Generator with Real Filters for WebView ────
   const filterPreviewHtml = useMemo(() => {
     if (!selectedPage) return '';
@@ -519,6 +686,8 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
       // B & W: photocopy monochrome
       filterCss = 'filter: grayscale(100%) contrast(240%);';
     }
+
+    const imgSrc = filterPreviewBase64 || selectedPage.uri;
 
     return `
       <!DOCTYPE html>
@@ -548,181 +717,343 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
         </style>
       </head>
       <body>
-        <img src="${selectedPage.uri}" />
+        <img src="${imgSrc}" />
       </body>
       </html>
     `;
-  }, [selectedPage, currentFilter, isDark]);
+  }, [selectedPage, currentFilter, isDark, filterPreviewBase64]);
 
   // ═════════════════════════════════════════════════════════════
   // MAIN SCREEN: SCANNER HOME (FOLDER LIST, SEARCH, TOP 3-DOTS)
   // ═════════════════════════════════════════════════════════════
   return (
     <View style={[styles.container, { backgroundColor: bg }]}>
-      {/* ── Top Header with Title, Search, and 3-Vertical-Dots Menu ── */}
-      <View style={[styles.mainTopHeader, { backgroundColor: cardBg, borderColor: border }]}>
-        <View style={styles.titleIconRow}>
-          <View style={[styles.headerIconBox, { backgroundColor: primaryColor + '18' }]}>
-            <ScanLine size={20} color={primaryColor} />
-          </View>
-          <View>
-            <Text style={[styles.headerTitle, { color: textColor }]}>Clear Scanner</Text>
-            <Text style={[styles.headerSub, { color: mutedColor }]}>
-              {displayedDocs.length} {displayedDocs.length === 1 ? 'Scan' : 'Scans'}
-            </Text>
-          </View>
-        </View>
+      {/* Offscreen Hardware-Accelerated Perspective Warping Bridge */}
+      <PerspectiveWarpBridge ref={warpBridgeRef} />
 
-        <View style={styles.topRightActions}>
-          {/* Search Button (🔍) */}
-          <TouchableOpacity
-            onPress={() => setShowSearch(!showSearch)}
-            style={styles.iconCircleBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Search size={20} color={showSearch ? primaryColor : textColor} />
-          </TouchableOpacity>
+      {/* ── STAGE 1: FOLDER & ALL SCANS VIEW ── */}
+      {stage === 'folder_view' && (
+        <View style={{ flex: 1 }}>
+          {/* ── Top Header with Folder Context, Search, and 3-Vertical-Dots Menu ── */}
+          <View style={[styles.mainTopHeader, { backgroundColor: cardBg, borderColor: border }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <View style={[styles.headerIconBox, { backgroundColor: primaryColor + '18', width: 34, height: 34, borderRadius: 10 }]}>
+                <Folder size={18} color={primaryColor} />
+              </View>
+              <View>
+                <Text style={{ fontSize: 15, fontWeight: '800', color: textColor }}>
+                  {selectedFolderId === null ? 'All Scans' : (folders.find((f) => f.id === selectedFolderId)?.name || 'Folder')}
+                </Text>
+                <Text style={{ fontSize: 11, color: mutedColor, fontWeight: '600' }}>
+                  {displayedDocs.length} {displayedDocs.length === 1 ? 'Document' : 'Documents'}
+                </Text>
+              </View>
+            </View>
 
-          {/* 3 Vertical Dots (⋮) Menu Button */}
-          <TouchableOpacity
-            onPress={() => setShowTopMenu(true)}
-            style={styles.iconCircleBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <MoreVertical size={20} color={textColor} />
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Expandable Search Input */}
-      {showSearch && (
-        <View style={[styles.searchBarWrap, { backgroundColor: cardBg, borderColor: border }]}>
-          <Search size={16} color={mutedColor} style={{ marginLeft: 8 }} />
-          <TextInput
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            placeholder="Search scans by document title..."
-            placeholderTextColor={mutedColor}
-            style={[styles.searchInput, { color: textColor }]}
-            autoFocus
-          />
-          {searchQuery ? (
-            <TouchableOpacity onPress={() => setSearchQuery('')} style={{ padding: 6 }}>
-              <X size={15} color={mutedColor} />
-            </TouchableOpacity>
-          ) : null}
-        </View>
-      )}
-
-      {/* Folders Bar */}
-      <View style={[styles.folderBarWrap, { borderColor: border }]}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderTabs}>
-          <TouchableOpacity
-            onPress={() => setSelectedFolderId(null)}
-            style={[
-              styles.folderChip,
-              {
-                backgroundColor: selectedFolderId === null ? primaryColor : cardBg,
-                borderColor: selectedFolderId === null ? primaryColor : border,
-              },
-            ]}
-          >
-            <Folder size={13} color={selectedFolderId === null ? '#ffffff' : textColor} />
-            <Text
-              style={[
-                styles.folderChipText,
-                { color: selectedFolderId === null ? '#ffffff' : textColor },
-              ]}
-            >
-              All Scans
-            </Text>
-          </TouchableOpacity>
-
-          {folders.map((f) => {
-            const isSelected = selectedFolderId === f.id;
-            return (
+            <View style={styles.topRightActions}>
+              {/* View Mode Toggle Button (Grid / List) */}
               <TouchableOpacity
-                key={f.id}
-                onPress={() => setSelectedFolderId(f.id)}
+                onPress={toggleViewMode}
+                style={styles.iconCircleBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                {viewMode === 'grid' ? (
+                  <List size={20} color={textColor} />
+                ) : (
+                  <LayoutGrid size={20} color={textColor} />
+                )}
+              </TouchableOpacity>
+
+              {/* Search Button (🔍) */}
+              <TouchableOpacity
+                onPress={() => setShowSearch(!showSearch)}
+                style={styles.iconCircleBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Search size={20} color={showSearch ? primaryColor : textColor} />
+              </TouchableOpacity>
+
+              {/* 3 Vertical Dots (⋮) Menu Button */}
+              <TouchableOpacity
+                onPress={() => setShowTopMenu(true)}
+                style={styles.iconCircleBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <MoreVertical size={20} color={textColor} />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Expandable Search Input */}
+          {showSearch && (
+            <View style={[styles.searchBarWrap, { backgroundColor: cardBg, borderColor: border }]}>
+              <Search size={16} color={mutedColor} style={{ marginLeft: 8 }} />
+              <TextInput
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="Search scans by document title..."
+                placeholderTextColor={mutedColor}
+                style={[styles.searchInput, { color: textColor }]}
+                autoFocus
+              />
+              {searchQuery ? (
+                <TouchableOpacity onPress={() => setSearchQuery('')} style={{ padding: 6 }}>
+                  <X size={15} color={mutedColor} />
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          )}
+
+          {/* Folders Bar */}
+          <View style={[styles.folderBarWrap, { borderColor: border }]}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.folderTabs}>
+              <TouchableOpacity
+                onPress={() => setSelectedFolderId(null)}
                 style={[
                   styles.folderChip,
                   {
-                    backgroundColor: isSelected ? primaryColor : cardBg,
-                    borderColor: isSelected ? primaryColor : border,
+                    backgroundColor: selectedFolderId === null ? primaryColor : cardBg,
+                    borderColor: selectedFolderId === null ? primaryColor : border,
                   },
                 ]}
               >
-                <Folder size={13} color={isSelected ? '#ffffff' : textColor} />
+                <Folder size={13} color={selectedFolderId === null ? '#ffffff' : textColor} />
                 <Text
                   style={[
                     styles.folderChipText,
-                    { color: isSelected ? '#ffffff' : textColor },
+                    { color: selectedFolderId === null ? '#ffffff' : textColor },
                   ]}
                 >
-                  {f.name}
+                  All Scans
                 </Text>
               </TouchableOpacity>
-            );
-          })}
 
-          {/* + New Folder Chip */}
-          <TouchableOpacity
-            onPress={() => setShowNewFolderModal(true)}
-            style={[styles.folderChip, styles.newFolderChip, { borderColor: primaryColor }]}
-          >
-            <FolderPlus size={13} color={primaryColor} />
-            <Text style={[styles.folderChipText, { color: primaryColor, fontWeight: '700' }]}>
-              + Folder
-            </Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </View>
-
-      {/* ── Document List / Grid View ── */}
-      <ScrollView contentContainerStyle={styles.docListScroll} showsVerticalScrollIndicator={false}>
-        {displayedDocs.length === 0 ? (
-          <View style={[styles.emptyStudioBox, { borderColor: border }]}>
-            <View style={[styles.emptyIconCircle, { backgroundColor: primaryColor + '14' }]}>
-              <Camera size={36} color={primaryColor} />
-            </View>
-            <Text style={[styles.emptyTitle, { color: textColor }]}>No Scans Here Yet</Text>
-            <Text style={[styles.emptyDesc, { color: mutedColor }]}>
-              Tap the camera button below to scan documents, adjust borders with draggable corners, and create clear PDFs.
-            </Text>
-          </View>
-        ) : viewMode === 'grid' ? (
-          // Grid View (2-Column Cards)
-          <View style={styles.gridContainer}>
-            {displayedDocs.map((doc) => (
-              <View
-                key={doc.id}
-                style={[styles.gridCard, { backgroundColor: cardBg, borderColor: border }]}
-              >
-                <TouchableOpacity
-                  onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
-                  style={styles.gridThumbBox}
-                  activeOpacity={0.8}
-                >
-                  {doc.thumbnailUri ? (
-                    <Image source={{ uri: doc.thumbnailUri }} style={styles.gridThumbImg} resizeMode="cover" />
-                  ) : (
-                    <FileText size={32} color="#dc2626" />
-                  )}
-                  <View style={styles.pdfBadge}>
-                    <Text style={styles.pdfBadgeText}>PDF</Text>
-                  </View>
-                </TouchableOpacity>
-
-                <View style={styles.gridMetaRow}>
+              {folders.map((f) => {
+                const isSelected = selectedFolderId === f.id;
+                return (
                   <TouchableOpacity
-                    onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
-                    style={{ flex: 1 }}
+                    key={f.id}
+                    onPress={() => setSelectedFolderId(f.id)}
+                    style={[
+                      styles.folderChip,
+                      {
+                        backgroundColor: isSelected ? primaryColor : cardBg,
+                        borderColor: isSelected ? primaryColor : border,
+                      },
+                    ]}
                   >
-                    <Text style={[styles.gridTitle, { color: textColor }]} numberOfLines={1}>
+                    <Folder size={13} color={isSelected ? '#ffffff' : textColor} />
+                    <Text
+                      style={[
+                        styles.folderChipText,
+                        { color: isSelected ? '#ffffff' : textColor },
+                      ]}
+                    >
+                      {f.name}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+
+              {/* + New Folder Chip */}
+              <TouchableOpacity
+                onPress={() => setShowNewFolderModal(true)}
+                style={[styles.folderChip, styles.newFolderChip, { borderColor: primaryColor }]}
+              >
+                <FolderPlus size={13} color={primaryColor} />
+                <Text style={[styles.folderChipText, { color: primaryColor, fontWeight: '700' }]}>
+                  + Folder
+                </Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+
+          {/* ── Document List / Grid View ── */}
+          <ScrollView contentContainerStyle={styles.docListScroll} showsVerticalScrollIndicator={false}>
+            {/* Back Banner when inside a Folder */}
+            {selectedFolderId !== null && (
+              <TouchableOpacity
+                onPress={() => setSelectedFolderId(null)}
+                style={[styles.folderBackBanner, { backgroundColor: primaryColor + '12', borderColor: primaryColor + '30' }]}
+                activeOpacity={0.7}
+              >
+                <ChevronLeft size={16} color={primaryColor} />
+                <Text style={{ fontSize: 13, fontWeight: '700', color: primaryColor }}>
+                  Back to All Scans
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {/* ── FOLDERS IN GRID VIEW ── */}
+            {selectedFolderId === null && folders.length > 0 && viewMode === 'grid' && (
+              <View style={{ marginBottom: 16 }}>
+                <Text style={[styles.sectionHeading, { color: mutedColor }]}>Folders ({folders.length})</Text>
+                <View style={styles.gridContainer}>
+                  {folders.map((f) => {
+                    const docCount = savedDocs.filter((d) => d.folderId === f.id).length;
+                    return (
+                      <TouchableOpacity
+                        key={f.id}
+                        onPress={() => setSelectedFolderId(f.id)}
+                        style={[styles.gridCard, styles.gridFolderCard, { backgroundColor: cardBg, borderColor: border }]}
+                        activeOpacity={0.75}
+                      >
+                        <View style={[styles.folderIconBox, { backgroundColor: '#f59e0b16' }]}>
+                          <Folder size={26} color="#f59e0b" />
+                        </View>
+                        <View style={{ marginTop: 8 }}>
+                          <Text style={[styles.gridTitle, { color: textColor }]} numberOfLines={1}>
+                            {f.name}
+                          </Text>
+                          <Text style={[styles.gridSub, { color: mutedColor }]}>
+                            {docCount} {docCount === 1 ? 'scan' : 'scans'}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+
+            {/* ── FOLDERS IN LIST VIEW ── */}
+            {selectedFolderId === null && folders.length > 0 && viewMode === 'list' && (
+              <View style={{ marginBottom: 14 }}>
+                <Text style={[styles.sectionHeading, { color: mutedColor }]}>Folders ({folders.length})</Text>
+                {folders.map((f) => {
+                  const docCount = savedDocs.filter((d) => d.folderId === f.id).length;
+                  return (
+                    <TouchableOpacity
+                      key={f.id}
+                      onPress={() => setSelectedFolderId(f.id)}
+                      style={[styles.listRow, { backgroundColor: cardBg, borderColor: border }]}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[styles.folderIconBoxList, { backgroundColor: '#f59e0b16' }]}>
+                        <Folder size={22} color="#f59e0b" />
+                      </View>
+                      <View style={{ flex: 1, paddingVertical: 4 }}>
+                        <Text style={[styles.listTitle, { color: textColor }]} numberOfLines={1}>
+                          {f.name}
+                        </Text>
+                        <Text style={[styles.listSub, { color: mutedColor }]}>
+                          {docCount} {docCount === 1 ? 'document' : 'documents'}
+                        </Text>
+                      </View>
+                      <ChevronRight size={18} color={mutedColor} />
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Section title for documents if folders are also displayed */}
+            {selectedFolderId === null && folders.length > 0 && displayedDocs.length > 0 && (
+              <Text style={[styles.sectionHeading, { color: mutedColor }]}>
+                Scanned Documents ({displayedDocs.length})
+              </Text>
+            )}
+
+            {displayedDocs.length === 0 ? (
+              <View style={[styles.emptyStudioBox, { borderColor: border }]}>
+                <View style={[styles.emptyIconCircle, { backgroundColor: primaryColor + '14' }]}>
+                  <Camera size={36} color={primaryColor} />
+                </View>
+                <Text style={[styles.emptyTitle, { color: textColor }]}>No Scans Here Yet</Text>
+                <Text style={[styles.emptyDesc, { color: mutedColor }]}>
+                  Tap the camera button below to scan documents, adjust borders with draggable corners, and create clear PDFs.
+                </Text>
+              </View>
+            ) : viewMode === 'grid' ? (
+              // Grid View (2-Column Cards)
+              <View style={styles.gridContainer}>
+                {displayedDocs.map((doc) => (
+                  <View
+                    key={doc.id}
+                    style={[styles.gridCard, { backgroundColor: cardBg, borderColor: border }]}
+                  >
+                    <TouchableOpacity
+                      onPress={() => handleOpenDocDetail(doc)}
+                      style={styles.gridThumbBox}
+                      activeOpacity={0.8}
+                    >
+                      {doc.thumbnailUri ? (
+                        <Image source={{ uri: doc.thumbnailUri }} style={styles.gridThumbImg} resizeMode="cover" />
+                      ) : (
+                        <FileText size={32} color="#dc2626" />
+                      )}
+                      <TouchableOpacity
+                        onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
+                        style={styles.pdfBadge}
+                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                      >
+                        <Text style={styles.pdfBadgeText}>PDF</Text>
+                      </TouchableOpacity>
+                    </TouchableOpacity>
+
+                    <View style={styles.gridMetaRow}>
+                      <TouchableOpacity
+                        onPress={() => handleOpenDocDetail(doc)}
+                        style={{ flex: 1 }}
+                      >
+                        <Text style={[styles.gridTitle, { color: textColor }]} numberOfLines={1}>
+                          {doc.title}
+                        </Text>
+                        <Text style={[styles.gridSub, { color: mutedColor }]}>
+                          {doc.pageCount}p • {doc.fileSize ? `${(doc.fileSize / 1024).toFixed(0)} KB • ` : ''}{new Date(doc.createdAt).toLocaleDateString()}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        onPress={() => {
+                          setActiveMenuDoc(doc);
+                          setShowDocMenuModal(true);
+                        }}
+                        style={styles.cardDotBtn}
+                      >
+                        <MoreVertical size={16} color={mutedColor} />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              // List View (Horizontal Rows)
+              displayedDocs.map((doc) => (
+                <View
+                  key={doc.id}
+                  style={[styles.listRow, { backgroundColor: cardBg, borderColor: border }]}
+                >
+                  <TouchableOpacity
+                    onPress={() => handleOpenDocDetail(doc)}
+                    style={styles.listThumbBox}
+                    activeOpacity={0.8}
+                  >
+                    {doc.thumbnailUri ? (
+                      <Image source={{ uri: doc.thumbnailUri }} style={styles.listThumbImg} resizeMode="cover" />
+                    ) : (
+                      <FileText size={22} color="#dc2626" />
+                    )}
+                    <TouchableOpacity
+                      onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
+                      style={styles.pdfBadge}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
+                      <Text style={styles.pdfBadgeText}>PDF</Text>
+                    </TouchableOpacity>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={() => handleOpenDocDetail(doc)}
+                    style={{ flex: 1, paddingVertical: 4 }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.listTitle, { color: textColor }]} numberOfLines={1}>
                       {doc.title}
                     </Text>
-                    <Text style={[styles.gridSub, { color: mutedColor }]}>
-                      {doc.pageCount}p • {doc.fileSize ? `${(doc.fileSize / 1024).toFixed(0)} KB • ` : ''}{new Date(doc.createdAt).toLocaleDateString()}
+                    <Text style={[styles.listSub, { color: mutedColor }]}>
+                      {doc.pageCount} {doc.pageCount === 1 ? 'Page' : 'Pages'} • {new Date(doc.createdAt).toLocaleDateString()}
+                      {doc.fileSize ? ` • ${(doc.fileSize / 1024).toFixed(0)} KB` : ''}
                     </Text>
                   </TouchableOpacity>
 
@@ -732,89 +1063,239 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                       setShowDocMenuModal(true);
                     }}
                     style={styles.cardDotBtn}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                   >
-                    <MoreVertical size={16} color={mutedColor} />
+                    <MoreVertical size={18} color={mutedColor} />
                   </TouchableOpacity>
                 </View>
-              </View>
-            ))}
-          </View>
-        ) : (
-          // List View (Horizontal Rows)
-          displayedDocs.map((doc) => (
-            <View
-              key={doc.id}
-              style={[styles.listRow, { backgroundColor: cardBg, borderColor: border }]}
+              ))
+            )}
+          </ScrollView>
+
+          {/* Floating Scan Action Bar at Bottom */}
+          <View style={[styles.floatingBottomBar, { backgroundColor: bg }]}>
+            <TouchableOpacity
+              onPress={handleStartCamera}
+              style={[styles.mainScanBtn, { backgroundColor: primaryColor }]}
+              activeOpacity={0.85}
             >
-              <TouchableOpacity
-                onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
-                style={styles.listThumbBox}
-                activeOpacity={0.8}
-              >
-                {doc.thumbnailUri ? (
-                  <Image source={{ uri: doc.thumbnailUri }} style={styles.listThumbImg} resizeMode="cover" />
-                ) : (
-                  <FileText size={22} color="#dc2626" />
-                )}
-                <View style={styles.pdfBadge}>
-                  <Text style={styles.pdfBadgeText}>PDF</Text>
+              <Camera size={20} color="#ffffff" />
+              <Text style={styles.mainScanBtnText}>
+                {isBatchMode ? 'Batch Camera Scan' : 'Scan Page'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={handleImportGallery}
+              style={[
+                styles.galleryBtn,
+                { backgroundColor: cardBg, borderColor: border, borderWidth: 1 },
+              ]}
+              activeOpacity={0.85}
+            >
+              <FolderOpen size={18} color={textColor} />
+              <Text style={[styles.galleryBtnText, { color: textColor }]}>Gallery</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* ── STAGE 2: DOCUMENT DETAIL / EDIT VIEW (IN-PAGE BENEATH ROOT TOP NAVBAR) ── */}
+      {stage === 'doc_detail' && (
+        <View style={{ flex: 1 }}>
+          <View style={[styles.docDetailHeader, { backgroundColor: cardBg, borderColor: border }]}>
+            <TouchableOpacity
+              onPress={() => setStage('folder_view')}
+              style={styles.editorBackBtn}
+            >
+              <ArrowLeft size={22} color={textColor} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.detailTitleWrap}
+              onPress={() => {
+                if (currentDoc) {
+                  setActiveMenuDoc(currentDoc);
+                  setRenameText(currentDoc.title);
+                  setShowRenameModal(true);
+                }
+              }}
+            >
+              <View style={styles.titleRow}>
+                <Text style={[styles.detailTitleText, { color: textColor }]} numberOfLines={1}>
+                  {currentDoc?.title || docTitle}
+                </Text>
+                <View style={styles.inlinePdfBadge}>
+                  <Text style={styles.inlinePdfText}>PDF</Text>
                 </View>
-              </TouchableOpacity>
+                <Edit3 size={13} color={mutedColor} style={{ marginLeft: 6 }} />
+              </View>
+              <Text style={[styles.detailSubText, { color: mutedColor }]}>
+                {pages.length} Pages • {currentDoc?.fileSize ? `${(currentDoc.fileSize / 1024).toFixed(0)} KB • ` : ''}{currentDoc?.createdAt ? new Date(currentDoc.createdAt).toLocaleDateString() : new Date().toLocaleDateString()}
+              </Text>
+            </TouchableOpacity>
 
-              <TouchableOpacity
-                onPress={() => onOpenPdf(doc.pdfUri, `${doc.title}.pdf`)}
-                style={{ flex: 1, paddingVertical: 4 }}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.listTitle, { color: textColor }]} numberOfLines={1}>
-                  {doc.title}
-                </Text>
-                <Text style={[styles.listSub, { color: mutedColor }]}>
-                  {doc.pageCount} {doc.pageCount === 1 ? 'Page' : 'Pages'} • {new Date(doc.createdAt).toLocaleDateString()}
-                  {doc.fileSize ? ` • ${(doc.fileSize / 1024).toFixed(0)} KB` : ''}
-                </Text>
-              </TouchableOpacity>
+            {/* Red PDF Preview Button */}
+            <TouchableOpacity
+              onPress={handleOpenPdfWithLatestChanges}
+              style={styles.headerPdfBtn}
+              activeOpacity={0.8}
+            >
+              <FileText size={14} color="#ffffff" />
+              <Text style={styles.headerPdfBtnText}>PDF</Text>
+            </TouchableOpacity>
 
+            <TouchableOpacity
+              onPress={() => setShowDetailDotsMenu(true)}
+              style={styles.iconCircleBtn}
+            >
+              <MoreVertical size={20} color={textColor} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Pages Grid with Direct Page Editing */}
+          <ScrollView contentContainerStyle={styles.detailGridScroll} showsVerticalScrollIndicator={false}>
+            <View style={styles.pagesGrid}>
+              {pages.map((p, idx) => (
+                <TouchableOpacity
+                  key={p.id}
+                  onPress={() => {
+                    setSelectedIdx(idx);
+                    setStage('border_adjust');
+                  }}
+                  style={[styles.pageGridCard, { backgroundColor: cardBg, borderColor: border }]}
+                  activeOpacity={0.85}
+                >
+                  <Image source={{ uri: p.uri }} style={styles.pageGridImg} resizeMode="contain" />
+                  <View style={styles.pageNumberBadge}>
+                    <Text style={styles.pageNumberText}>{idx + 1}</Text>
+                  </View>
+
+                  {/* Quick Edit Overlay Bar */}
+                  <View style={styles.pageCardActions}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        setSelectedIdx(idx);
+                        setStage('border_adjust');
+                      }}
+                      style={styles.pageActionMiniBtn}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
+                      <Crop size={14} color="#ffffff" />
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={() => {
+                        setSelectedIdx(idx);
+                        setStage('filter_enhance');
+                      }}
+                      style={styles.pageActionMiniBtn}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
+                      <Wand2 size={14} color="#ffffff" />
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={() => {
+                        setPages((prev) =>
+                          prev.map((item, i) =>
+                            i === idx ? { ...item, rotation: (item.rotation + 90) % 360 } : item
+                          )
+                        );
+                      }}
+                      style={styles.pageActionMiniBtn}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
+                      <RotateCw size={14} color="#ffffff" />
+                    </TouchableOpacity>
+
+                    {pages.length > 1 && (
+                      <TouchableOpacity
+                        onPress={() => {
+                          setPages((prev) => prev.filter((_, i) => i !== idx));
+                          setSelectedIdx(0);
+                        }}
+                        style={[styles.pageActionMiniBtn, { backgroundColor: 'rgba(239,68,68,0.85)' }]}
+                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                      >
+                        <Trash2 size={14} color="#ffffff" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </TouchableOpacity>
+              ))}
+
+              {/* + Add Page Card */}
               <TouchableOpacity
                 onPress={() => {
-                  setActiveMenuDoc(doc);
-                  setShowDocMenuModal(true);
+                  Alert.alert(
+                    'Add Page',
+                    'Choose how you want to add pages to this PDF:',
+                    [
+                      { text: 'Take Photo (Camera)', onPress: handleStartCamera },
+                      { text: 'Pick from Gallery', onPress: handleImportGallery },
+                      { text: 'Cancel', style: 'cancel' },
+                    ]
+                  );
                 }}
-                style={styles.cardDotBtn}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                style={[
+                  styles.pageGridCard,
+                  styles.addPageCard,
+                  { backgroundColor: cardBg, borderColor: border },
+                ]}
+                activeOpacity={0.8}
               >
-                <MoreVertical size={18} color={mutedColor} />
+                <View style={[styles.addPageCircle, { backgroundColor: primaryColor + '18' }]}>
+                  <Plus size={26} color={primaryColor} />
+                </View>
+                <Text style={[styles.addPageText, { color: primaryColor }]}>+ Add Page</Text>
               </TouchableOpacity>
             </View>
-          ))
-        )}
-      </ScrollView>
+          </ScrollView>
 
-      {/* Floating Scan Action Bar at Bottom */}
-      <View style={[styles.floatingBottomBar, { backgroundColor: bg }]}>
-        <TouchableOpacity
-          onPress={handleStartCamera}
-          style={[styles.mainScanBtn, { backgroundColor: primaryColor }]}
-          activeOpacity={0.85}
-        >
-          <Camera size={20} color="#ffffff" />
-          <Text style={styles.mainScanBtnText}>
-            {isBatchMode ? 'Batch Camera Scan' : 'Scan Page'}
-          </Text>
-        </TouchableOpacity>
+          {/* Bottom Action Bar: Add Page, Share & View PDF */}
+          <View style={[styles.detailBottomBar, { backgroundColor: cardBg, borderColor: border }]}>
+            <TouchableOpacity
+              onPress={() => {
+                Alert.alert(
+                  'Add Page',
+                  'Choose how you want to add pages to this PDF:',
+                  [
+                    { text: 'Take Photo (Camera)', onPress: handleStartCamera },
+                    { text: 'Pick from Gallery', onPress: handleImportGallery },
+                    { text: 'Cancel', style: 'cancel' },
+                  ]
+                );
+              }}
+              style={[styles.addPageBottomBtn, { borderColor: border, borderWidth: 1, backgroundColor: cardBg }]}
+              activeOpacity={0.85}
+            >
+              <Camera size={18} color={textColor} />
+              <Text style={[styles.addPageBottomBtnText, { color: textColor }]}>Add Page</Text>
+            </TouchableOpacity>
 
-        <TouchableOpacity
-          onPress={handleImportGallery}
-          style={[
-            styles.galleryBtn,
-            { backgroundColor: cardBg, borderColor: border, borderWidth: 1 },
-          ]}
-          activeOpacity={0.85}
-        >
-          <FolderOpen size={18} color={textColor} />
-          <Text style={[styles.galleryBtnText, { color: textColor }]}>Gallery</Text>
-        </TouchableOpacity>
-      </View>
+            <TouchableOpacity
+              onPress={() => {
+                if (currentDoc) handleShareDoc(currentDoc);
+              }}
+              style={[styles.shareActionBtn, { backgroundColor: '#059669' }]}
+              activeOpacity={0.85}
+            >
+              <Share2 size={18} color="#ffffff" />
+              <Text style={styles.shareActionBtnText}>Share</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={handleOpenPdfWithLatestChanges}
+              style={[styles.openActionBtn, { backgroundColor: '#dc2626' }]}
+              activeOpacity={0.85}
+            >
+              <FileText size={18} color="#ffffff" />
+              <Text style={styles.openActionBtnText}>View PDF</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       {/* ── TOP 3-DOTS MENU MODAL ── */}
       <Modal
@@ -836,8 +1317,8 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
             <TouchableOpacity
               style={styles.sheetOption}
               onPress={() => {
-                setViewMode(viewMode === 'grid' ? 'list' : 'grid');
                 setShowTopMenu(false);
+                toggleViewMode();
               }}
             >
               {viewMode === 'grid' ? (
@@ -872,7 +1353,9 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
               style={styles.sheetOption}
               onPress={() => {
                 setShowTopMenu(false);
-                handleImportPdfDocument();
+                setTimeout(() => {
+                  handleImportPdfDocument();
+                }, 350);
               }}
             >
               <Upload size={18} color="#2563eb" />
@@ -884,7 +1367,9 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
               style={styles.sheetOption}
               onPress={() => {
                 setShowTopMenu(false);
-                handleImportGallery();
+                setTimeout(() => {
+                  handleImportGallery();
+                }, 350);
               }}
             >
               <FolderOpen size={18} color="#d97706" />
@@ -896,7 +1381,9 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
               style={styles.sheetOption}
               onPress={() => {
                 setShowTopMenu(false);
-                setShowNewFolderModal(true);
+                setTimeout(() => {
+                  setShowNewFolderModal(true);
+                }, 250);
               }}
             >
               <FolderPlus size={18} color="#7c3aed" />
@@ -949,22 +1436,40 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
             <TouchableOpacity
               style={styles.sheetOption}
               onPress={() => {
-                if (activeMenuDoc) {
-                  setShowDocMenuModal(false);
-                  onOpenPdf(activeMenuDoc.pdfUri, `${activeMenuDoc.title}.pdf`);
+                const docToEdit = activeMenuDoc;
+                setShowDocMenuModal(false);
+                if (docToEdit) {
+                  handleOpenDocDetail(docToEdit);
                 }
               }}
             >
-              <Eye size={18} color={primaryColor} />
-              <Text style={[styles.sheetOptionText, { color: textColor }]}>Preview / Open PDF</Text>
+              <SlidersHorizontal size={18} color={primaryColor} />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>Edit / Adjust Pages</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={styles.sheetOption}
               onPress={() => {
-                if (activeMenuDoc) {
-                  setShowDocMenuModal(false);
-                  handleShareDoc(activeMenuDoc);
+                const docToOpen = activeMenuDoc;
+                setShowDocMenuModal(false);
+                if (docToOpen) {
+                  onOpenPdf(docToOpen.pdfUri, `${docToOpen.title}.pdf`);
+                }
+              }}
+            >
+              <Eye size={18} color="#0284c7" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>View PDF</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={() => {
+                const docToShare = activeMenuDoc;
+                setShowDocMenuModal(false);
+                if (docToShare) {
+                  setTimeout(() => {
+                    handleShareDoc(docToShare);
+                  }, 350);
                 }
               }}
             >
@@ -975,9 +1480,13 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
             <TouchableOpacity
               style={styles.sheetOption}
               onPress={() => {
-                if (activeMenuDoc) {
-                  setRenameText(activeMenuDoc.title);
-                  setShowRenameModal(true);
+                const docToRename = activeMenuDoc;
+                setShowDocMenuModal(false);
+                if (docToRename) {
+                  setRenameText(docToRename.title);
+                  setTimeout(() => {
+                    setShowRenameModal(true);
+                  }, 250);
                 }
               }}
             >
@@ -987,7 +1496,12 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
 
             <TouchableOpacity
               style={styles.sheetOption}
-              onPress={() => setShowMoveModal(true)}
+              onPress={() => {
+                setShowDocMenuModal(false);
+                setTimeout(() => {
+                  setShowMoveModal(true);
+                }, 250);
+              }}
             >
               <Move size={18} color="#d97706" />
               <Text style={[styles.sheetOptionText, { color: textColor }]}>Move to Folder</Text>
@@ -996,8 +1510,12 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
             <TouchableOpacity
               style={[styles.sheetOption, { borderTopWidth: 1, borderTopColor: border, marginTop: 4 }]}
               onPress={() => {
-                if (activeMenuDoc) {
-                  handleDeleteDoc(activeMenuDoc.id);
+                const docToDelete = activeMenuDoc;
+                setShowDocMenuModal(false);
+                if (docToDelete) {
+                  setTimeout(() => {
+                    handleDeleteDoc(docToDelete.id);
+                  }, 250);
                 }
               }}
             >
@@ -1129,10 +1647,10 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
           FULL-SCREEN DEDICATED PAGE MODAL FOR STEPS 1, 2, AND 3
          ═════════════════════════════════════════════════════════════ */}
       <Modal
-        visible={stage !== 'folder_view'}
+        visible={stage === 'border_adjust' || stage === 'filter_enhance'}
         animationType="slide"
         statusBarTranslucent
-        onRequestClose={() => setStage('folder_view')}
+        onRequestClose={() => setStage(currentDoc ? 'doc_detail' : 'folder_view')}
       >
         <SafeAreaView style={[styles.fullScreenModal, { backgroundColor: bg }]}>
           {/* ─────────────────────────────────────────────────────────
@@ -1143,7 +1661,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
               {/* Clean Top Bar */}
               <View style={[styles.editorTopBar, { backgroundColor: cardBg, borderColor: border }]}>
                 <TouchableOpacity
-                  onPress={() => setStage('folder_view')}
+                  onPress={() => setStage(currentDoc ? 'doc_detail' : 'folder_view')}
                   style={styles.editorBackBtn}
                 >
                   <ArrowLeft size={22} color={textColor} />
@@ -1173,7 +1691,7 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                 </TouchableOpacity>
               </View>
 
-              {/* Main Canvas with True Draggable Corner Handles */}
+              {/* Main Canvas with True 4-Corner Draggable Loupe Handles */}
               <View
                 style={styles.cropCanvasArea}
                 onLayout={(e) => {
@@ -1183,75 +1701,105 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                   }
                 }}
               >
-                {selectedPage ? (
-                  <View style={styles.cropCanvasInner}>
-                    <Image
-                      source={{ uri: selectedPage.originalUri || selectedPage.uri }}
-                      style={[
-                        styles.canvasImage,
-                        { transform: [{ rotate: `${selectedPage.rotation}deg` }] },
-                      ]}
-                      resizeMode="contain"
-                    />
+                {selectedPage ? (() => {
+                  const activeCorners = selectedPage.corners || DEFAULT_QUAD_CORNERS;
+                  const W = renderedImgRect.width || 300;
+                  const H = renderedImgRect.height || 400;
+                  const offX = renderedImgRect.left || 0;
+                  const offY = renderedImgRect.top || 0;
 
-                    {/* Interactive Draggable Crop Overlay */}
-                    {selectedPage.crop && (
-                      <View
-                        style={[
-                          styles.cropBoundingBox,
-                          {
-                            top: `${selectedPage.crop.topPercent}%`,
-                            bottom: `${selectedPage.crop.bottomPercent}%`,
-                            left: `${selectedPage.crop.leftPercent}%`,
-                            right: `${selectedPage.crop.rightPercent}%`,
-                            borderColor: '#10b981',
-                          },
-                        ]}
+                  const pTL = { x: (activeCorners.tl.x / 100) * W + offX, y: (activeCorners.tl.y / 100) * H + offY };
+                  const pTR = { x: (activeCorners.tr.x / 100) * W + offX, y: (activeCorners.tr.y / 100) * H + offY };
+                  const pBR = { x: (activeCorners.br.x / 100) * W + offX, y: (activeCorners.br.y / 100) * H + offY };
+                  const pBL = { x: (activeCorners.bl.x / 100) * W + offX, y: (activeCorners.bl.y / 100) * H + offY };
+
+                  const t1 = { x: pTL.x + (pTR.x - pTL.x) * (1 / 3), y: pTL.y + (pTR.y - pTL.y) * (1 / 3) };
+                  const t2 = { x: pTL.x + (pTR.x - pTL.x) * (2 / 3), y: pTL.y + (pTR.y - pTL.y) * (2 / 3) };
+                  const b1 = { x: pBL.x + (pBR.x - pBL.x) * (1 / 3), y: pBL.y + (pBR.y - pBL.y) * (1 / 3) };
+                  const b2 = { x: pBL.x + (pBR.x - pBR.x) * (2 / 3), y: pBL.y + (pBR.y - pBL.y) * (2 / 3) };
+
+                  const l1 = { x: pTL.x + (pBL.x - pTL.x) * (1 / 3), y: pTL.y + (pBL.y - pTL.y) * (1 / 3) };
+                  const l2 = { x: pTL.x + (pBL.x - pTL.x) * (2 / 3), y: pTL.y + (pBL.y - pTL.y) * (2 / 3) };
+                  const r1 = { x: pTR.x + (pBR.x - pTR.x) * (1 / 3), y: pTR.y + (pBR.y - pTR.y) * (1 / 3) };
+                  const r2 = { x: pTR.x + (pBR.x - pTR.x) * (2 / 3), y: pTR.y + (pBR.y - pTR.y) * (2 / 3) };
+
+                  return (
+                    <View style={styles.cropCanvasInner}>
+                      <Image
+                        source={{ uri: selectedPage.originalUri || selectedPage.uri }}
+                        style={{
+                          position: 'absolute',
+                          left: offX,
+                          top: offY,
+                          width: W,
+                          height: H,
+                          transform: [{ rotate: `${selectedPage.rotation}deg` }],
+                        }}
+                        resizeMode="contain"
+                      />
+
+                      {/* SVG Perspective Polygon & 3x3 Dashed Grid */}
+                      <Svg
+                        style={StyleSheet.absoluteFill}
+                        pointerEvents="none"
+                        width={cropLayout.width || 300}
+                        height={cropLayout.height || 400}
                       >
-                        {/* 4 True Draggable Corner Loupe Handles */}
-                        {/* Top-Left */}
-                        <View
-                          {...panTL.panHandlers}
-                          style={[styles.draggableCorner, styles.tlCorner]}
-                          hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
-                        >
-                          <View style={styles.cornerDot} />
-                        </View>
+                        <Polygon
+                          points={`${pTL.x},${pTL.y} ${pTR.x},${pTR.y} ${pBR.x},${pBR.y} ${pBL.x},${pBL.y}`}
+                          fill="rgba(16, 185, 129, 0.16)"
+                          stroke="#10b981"
+                          strokeWidth={2.5}
+                        />
+                        <Line x1={t1.x} y1={t1.y} x2={b1.x} y2={b1.y} stroke="#10b981" strokeWidth={1} strokeDasharray="5,5" opacity={0.65} />
+                        <Line x1={t2.x} y1={t2.y} x2={b2.x} y2={b2.y} stroke="#10b981" strokeWidth={1} strokeDasharray="5,5" opacity={0.65} />
+                        <Line x1={l1.x} y1={l1.y} x2={r1.x} y2={r1.y} stroke="#10b981" strokeWidth={1} strokeDasharray="5,5" opacity={0.65} />
+                        <Line x1={l2.x} y1={l2.y} x2={r2.x} y2={r2.y} stroke="#10b981" strokeWidth={1} strokeDasharray="5,5" opacity={0.65} />
+                      </Svg>
 
-                        {/* Top-Right */}
-                        <View
-                          {...panTR.panHandlers}
-                          style={[styles.draggableCorner, styles.trCorner]}
-                          hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
-                        >
-                          <View style={styles.cornerDot} />
+                      {/* 4 True Draggable Corner Loupe Handles */}
+                      <View
+                        {...panTL.panHandlers}
+                        style={[styles.draggableLoupe, { left: pTL.x - 22, top: pTL.y - 22 }]}
+                        hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
+                      >
+                        <View style={styles.loupeRing}>
+                          <View style={styles.loupeDot} />
                         </View>
-
-                        {/* Bottom-Left */}
-                        <View
-                          {...panBL.panHandlers}
-                          style={[styles.draggableCorner, styles.blCorner]}
-                          hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
-                        >
-                          <View style={styles.cornerDot} />
-                        </View>
-
-                        {/* Bottom-Right */}
-                        <View
-                          {...panBR.panHandlers}
-                          style={[styles.draggableCorner, styles.brCorner]}
-                          hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
-                        >
-                          <View style={styles.cornerDot} />
-                        </View>
-
-                        {/* Center Crosshair Grid */}
-                        <View style={styles.crossLineH} />
-                        <View style={styles.crossLineV} />
                       </View>
-                    )}
-                  </View>
-                ) : null}
+
+                      <View
+                        {...panTR.panHandlers}
+                        style={[styles.draggableLoupe, { left: pTR.x - 22, top: pTR.y - 22 }]}
+                        hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
+                      >
+                        <View style={styles.loupeRing}>
+                          <View style={styles.loupeDot} />
+                        </View>
+                      </View>
+
+                      <View
+                        {...panBR.panHandlers}
+                        style={[styles.draggableLoupe, { left: pBR.x - 22, top: pBR.y - 22 }]}
+                        hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
+                      >
+                        <View style={styles.loupeRing}>
+                          <View style={styles.loupeDot} />
+                        </View>
+                      </View>
+
+                      <View
+                        {...panBL.panHandlers}
+                        style={[styles.draggableLoupe, { left: pBL.x - 22, top: pBL.y - 22 }]}
+                        hitSlop={{ top: 25, bottom: 25, left: 25, right: 25 }}
+                      >
+                        <View style={styles.loupeRing}>
+                          <View style={styles.loupeDot} />
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })() : null}
               </View>
 
               {/* Multi-Page Navigation if Batch */}
@@ -1371,14 +1919,37 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                 </ScrollView>
               </View>
 
-              {/* Visual Filter Canvas (WebView WYSIWYG Rendering) */}
+              {/* Visual Filter Canvas (WebView WYSIWYG Rendering with Instant Native Fallback) */}
               <View style={styles.filterCanvasArea}>
-                <WebView
-                  originWhitelist={['*']}
-                  source={{ html: filterPreviewHtml }}
-                  scrollEnabled={false}
-                  style={{ width: '100%', height: '100%', backgroundColor: 'transparent' }}
-                />
+                {selectedPage && (
+                  <Image
+                    source={{ uri: selectedPage.uri }}
+                    style={[
+                      StyleSheet.absoluteFill,
+                      {
+                        width: '100%',
+                        height: '100%',
+                        transform: [{ rotate: `${selectedPage.rotation}deg` }],
+                      },
+                    ]}
+                    resizeMode="contain"
+                  />
+                )}
+                {filterPreviewBase64 ? (
+                  <WebViewAny
+                    originWhitelist={['*']}
+                    allowFileAccess
+                    allowFileAccessFromFileURLs
+                    allowUniversalAccessFromFileURLs
+                    source={{ html: filterPreviewHtml }}
+                    scrollEnabled={false}
+                    style={{ width: '100%', height: '100%', backgroundColor: 'transparent' }}
+                  />
+                ) : (
+                  <View style={styles.filterLoadingOverlay}>
+                    <ActivityIndicator size="small" color={primaryColor} />
+                  </View>
+                )}
               </View>
 
               {/* Bottom Bar: Crop, Rotate, and Confirm Make PDF */}
@@ -1414,94 +1985,6 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                       <Text style={styles.confirmYesBtnText}>Confirm (Make PDF)</Text>
                     </>
                   )}
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-
-          {/* ─────────────────────────────────────────────────────────
-              STEP 3: DOCUMENT DETAIL SCREEN
-             ───────────────────────────────────────────────────────── */}
-          {stage === 'doc_detail' && (
-            <View style={{ flex: 1 }}>
-              <View style={[styles.docDetailHeader, { backgroundColor: cardBg, borderColor: border }]}>
-                <TouchableOpacity
-                  onPress={() => setStage('folder_view')}
-                  style={styles.editorBackBtn}
-                >
-                  <ArrowLeft size={22} color={textColor} />
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.detailTitleWrap}
-                  onPress={() => {
-                    if (currentDoc) {
-                      setActiveMenuDoc(currentDoc);
-                      setRenameText(currentDoc.title);
-                      setShowRenameModal(true);
-                    }
-                  }}
-                >
-                  <View style={styles.titleRow}>
-                    <Text style={[styles.detailTitleText, { color: textColor }]} numberOfLines={1}>
-                      {currentDoc?.title || docTitle}
-                    </Text>
-                    <View style={styles.inlinePdfBadge}>
-                      <Text style={styles.inlinePdfText}>PDF</Text>
-                    </View>
-                    <Edit3 size={13} color={mutedColor} style={{ marginLeft: 6 }} />
-                  </View>
-                  <Text style={[styles.detailSubText, { color: mutedColor }]}>
-                    {pages.length} Pages • {currentDoc?.fileSize ? `${(currentDoc.fileSize / 1024).toFixed(0)} KB • ` : ''}{currentDoc?.createdAt ? new Date(currentDoc.createdAt).toLocaleDateString() : new Date().toLocaleDateString()}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  onPress={() => setShowDetailDotsMenu(true)}
-                  style={styles.iconCircleBtn}
-                >
-                  <MoreVertical size={20} color={textColor} />
-                </TouchableOpacity>
-              </View>
-
-              {/* Pages Grid */}
-              <ScrollView contentContainerStyle={styles.detailGridScroll} showsVerticalScrollIndicator={false}>
-                <View style={styles.pagesGrid}>
-                  {pages.map((p, idx) => (
-                    <View key={p.id} style={[styles.pageGridCard, { backgroundColor: cardBg, borderColor: border }]}>
-                      <Image source={{ uri: p.uri }} style={styles.pageGridImg} resizeMode="contain" />
-                      <View style={styles.pageNumberBadge}>
-                        <Text style={styles.pageNumberText}>{idx + 1}</Text>
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              </ScrollView>
-
-              {/* Bottom Action Bar: Share & Open */}
-              <View style={[styles.detailBottomBar, { backgroundColor: cardBg, borderColor: border }]}>
-                <TouchableOpacity
-                  onPress={() => {
-                    if (currentDoc) handleShareDoc(currentDoc);
-                  }}
-                  style={[styles.shareActionBtn, { backgroundColor: '#059669' }]}
-                  activeOpacity={0.85}
-                >
-                  <Share2 size={18} color="#ffffff" />
-                  <Text style={styles.shareActionBtnText}>Share PDF</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  onPress={async () => {
-                    if (currentDoc) {
-                      await onOpenPdf(currentDoc.pdfUri, `${currentDoc.title}.pdf`);
-                    }
-                  }}
-                  style={[styles.openActionBtn, { backgroundColor: primaryColor }]}
-                  activeOpacity={0.85}
-                >
-                  <Eye size={18} color="#ffffff" />
-                  <Text style={styles.openActionBtnText}>Open Document</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1609,7 +2092,7 @@ const styles = StyleSheet.create({
   },
   docListScroll: {
     padding: 16,
-    paddingBottom: 110,
+    paddingBottom: 84,
   },
   emptyStudioBox: {
     borderWidth: 1,
@@ -1727,7 +2210,7 @@ const styles = StyleSheet.create({
   },
   floatingBottomBar: {
     position: 'absolute',
-    bottom: 60,
+    bottom: 14,
     left: 16,
     right: 16,
     flexDirection: 'row',
@@ -2145,5 +2628,149 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 13.5,
     fontWeight: '800',
+  },
+  headerPdfBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#dc2626',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    marginRight: 8,
+  },
+  headerPdfBtnText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  sectionHeading: {
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginBottom: 8,
+    marginTop: 4,
+    paddingHorizontal: 2,
+  },
+  gridFolderCard: {
+    padding: 12,
+    justifyContent: 'center',
+  },
+  folderIconBox: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  folderIconBoxList: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  folderBackBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 12,
+  },
+  draggableLoupe: {
+    position: 'absolute',
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 99,
+  },
+  loupeRing: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 3,
+    borderColor: '#10b981',
+    backgroundColor: 'rgba(16, 185, 129, 0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 3,
+    elevation: 5,
+  },
+  loupeDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#ffffff',
+    borderWidth: 2,
+    borderColor: '#10b981',
+  },
+  filterLoadingOverlay: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.1)',
+  },
+  pageCardActions: {
+    position: 'absolute',
+    bottom: 6,
+    left: 6,
+    right: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    borderRadius: 16,
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+  },
+  pageActionMiniBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addPageCard: {
+    borderStyle: 'dashed',
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  addPageCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addPageText: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  addPageBottomBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 46,
+    borderRadius: 23,
+  },
+  addPageBottomBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
 });

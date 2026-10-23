@@ -54,14 +54,22 @@ import { DocxConverterModal, DocxMode } from '../components/DocxConverterModal';
 import { TextToPdfModal } from '../components/TextToPdfModal';
 import { PdfToTextModal } from '../components/PdfToTextModal';
 import { CompressPdfModal } from '../components/CompressPdfModal';
+import { GoogleDriveIcon } from '../components/GoogleDriveIcon';
 // ---------------------------------------------------------------------------
 // Types & Constants
 // ---------------------------------------------------------------------------
 const { width: SCREEN_W } = Dimensions.get('window');
 
-interface RecentFile { uri: string; name: string; openedAt: number; }
+interface RecentFile { uri: string; name: string; openedAt: number; size?: number; }
 interface BookmarkEntry { page: number; note: string; addedAt: number; }
 export interface OutlineItem { title: string; page?: number | null; items?: OutlineItem[]; }
+
+export const formatRecentFileSize = (bytes?: number): string => {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
 
 const STORAGE_RECENT = '@pdfReader_recentFiles';
 const STORAGE_BOOKMARKS_PREFIX = '@pdfReader_bookmarks_';
@@ -1544,6 +1552,7 @@ export default function StandalonePdfReader({
       setLoadProgress('Loading PDF data\u2026');
 
       let b64: string;
+      let localUri = uri;
       if ((Platform.OS as string) === 'web') {
         const cachedB64 = await getPdfFromDb(uri);
         if (cachedB64) {
@@ -1586,7 +1595,7 @@ export default function StandalonePdfReader({
           await savePdfToDb(uri, b64);
         }
       } else {
-        let localUri = uri;
+        localUri = uri;
         if (uri.startsWith('gdrive://')) {
           setLoadProgress('Loading Google Drive PDF\u2026');
           const fileId = uri.replace('gdrive://', '').split('/')[0];
@@ -1685,7 +1694,16 @@ export default function StandalonePdfReader({
         b64 = await FileSystem.readAsStringAsync(localUri, { encoding: 'base64' });
       }
       setPdfBase64(b64);
-      saveRecent({ uri, name: fileName, openedAt: Date.now() });
+      let resolvedSize: number | undefined;
+      if (Platform.OS !== 'web' && localUri) {
+        try {
+          const info = await FileSystem.getInfoAsync(localUri);
+          if (info.exists && (info as any).size) {
+            resolvedSize = (info as any).size;
+          }
+        } catch {}
+      }
+      saveRecent({ uri, name: fileName, openedAt: Date.now(), size: resolvedSize });
     } catch (err: any) {
       Alert.alert('Error', 'Failed to open PDF: ' + (err?.message ?? 'Unknown error'));
       setLoading(false);
@@ -1775,19 +1793,51 @@ export default function StandalonePdfReader({
   const loadRecent = async () => {
     try {
       const raw = await AsyncStorage.getItem(STORAGE_RECENT);
-      if (raw) setRecentFiles(JSON.parse(raw));
+      if (raw) {
+        const list: RecentFile[] = JSON.parse(raw);
+        setRecentFiles(list);
+
+        // Lazily populate sizes for any existing entries missing size
+        const hasMissing = list.some(f => !f.size && f.uri && !f.uri.startsWith('http') && !f.uri.startsWith('gdrive://'));
+        if (hasMissing) {
+          const resolved = await Promise.all(
+            list.map(async (f) => {
+              if (f.size || !f.uri || f.uri.startsWith('http') || f.uri.startsWith('gdrive://')) return f;
+              try {
+                const info = await FileSystem.getInfoAsync(f.uri);
+                if (info.exists && (info as any).size) {
+                  return { ...f, size: (info as any).size };
+                }
+              } catch {}
+              return f;
+            })
+          );
+          setRecentFiles(resolved);
+          await AsyncStorage.setItem(STORAGE_RECENT, JSON.stringify(resolved));
+        }
+      }
     } catch { }
   };
 
   const saveRecent = async (file: RecentFile) => {
     try {
+      let fileSize = file.size;
+      if (!fileSize && file.uri && !file.uri.startsWith('http') && !file.uri.startsWith('gdrive://')) {
+        try {
+          const info = await FileSystem.getInfoAsync(file.uri);
+          if (info.exists && (info as any).size) {
+            fileSize = (info as any).size;
+          }
+        } catch {}
+      }
+      const fileToSave: RecentFile = { ...file, size: fileSize };
       const raw = await AsyncStorage.getItem(STORAGE_RECENT);
       let currentList: RecentFile[] = [];
       if (raw) {
         try { currentList = JSON.parse(raw); } catch { }
       }
       // Deduplicate: filter out entries with exact same URI or matching name+URI
-      const updated = [file, ...currentList.filter(f => f.uri !== file.uri && f.name !== file.name)].slice(0, 15);
+      const updated = [fileToSave, ...currentList.filter(f => f.uri !== fileToSave.uri && f.name !== fileToSave.name)].slice(0, 15);
       setRecentFiles(updated);
       await AsyncStorage.setItem(STORAGE_RECENT, JSON.stringify(updated));
     } catch { }
@@ -3478,7 +3528,7 @@ export default function StandalonePdfReader({
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, marginRight: 8 }}>
                     <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: colors.primary + '20', alignItems: 'center', justifyContent: 'center' }}>
-                      <HardDrive size={18} color={colors.primary} />
+                      <GoogleDriveIcon size={19} />
                     </View>
                     <View style={{ flex: 1 }}>
                       <Text numberOfLines={1} style={[s.sheetTitle, { color: colors.text, marginBottom: 0, textAlign: 'left', fontSize: 15.5 }]}>
@@ -3523,7 +3573,7 @@ export default function StandalonePdfReader({
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                   <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: colors.primary + '20', alignItems: 'center', justifyContent: 'center' }}>
-                    <HardDrive size={18} color={colors.primary} />
+                    <GoogleDriveIcon size={18} />
                   </View>
                   <View>
                     <Text style={[s.sheetTitle, { color: colors.text, marginBottom: 0, textAlign: 'left' }]}>Google Drive</Text>
@@ -4034,12 +4084,8 @@ export default function StandalonePdfReader({
   };
 
   const renderTopBar = () => {
-    // When no PDF is loaded (Home, Files, Scan, Tools)
+    // When no PDF is loaded (Home, Files, Scan, Tools) - show on all pages
     if (!hasPdf) {
-      if (navTab === 'scan' || navTab === 'tools') {
-        return null;
-      }
-
       return (
         <View style={[s.header, {
           backgroundColor: rBg,
@@ -4051,66 +4097,105 @@ export default function StandalonePdfReader({
           alignItems: 'center',
           justifyContent: 'space-between',
         }]}>
-          {/* Logo + Brand: Helper PDF / Reader & Scanner */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+          {/* Logo + Brand: Helper PDF / reader & scanner */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}>
             <View style={{
-              width: 38, height: 38, borderRadius: 11,
+              width: 33, height: 33, borderRadius: 8.5,
               overflow: 'hidden',
-              shadowColor: colors.primary, shadowOffset: { width: 0, height: 2 },
-              shadowOpacity: 0.25, shadowRadius: 4, elevation: 4,
+              backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)',
+              borderWidth: 1,
+              borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)',
+              shadowColor: colors.primary, shadowOffset: { width: 0, height: 1.5 },
+              shadowOpacity: 0.18, shadowRadius: 3, elevation: 2,
             }}>
               <Image
                 source={isDark ? appIconDark : appIcon}
-                style={{ width: 38, height: 38 }}
+                style={{ width: 33, height: 33 }}
                 resizeMode="cover"
               />
             </View>
-            <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 16, fontWeight: '900', color: rText, letterSpacing: -0.3 }} numberOfLines={1}>
+            <View style={{ justifyContent: 'center' }}>
+              <Text style={{ fontSize: 15.5, fontWeight: '900', color: rText, letterSpacing: -0.3, lineHeight: 18 }} numberOfLines={1}>
                 Helper PDF
               </Text>
-              <Text style={{ fontSize: 10, color: rMuted, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.8, marginTop: -2 }}>
-                Reader & Scanner
+              <Text style={{ fontSize: 8.8, color: colors.primary, fontWeight: '700', letterSpacing: 0.35, lineHeight: 11, marginTop: 0.5 }} numberOfLines={1}>
+                reader & scanner
               </Text>
             </View>
           </View>
 
-          {/* Right Action Icons: Cloud Drive + Direct Theme Toggle */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <TouchableOpacity
-              onPress={() => setShowDriveModal(true)}
-              style={{
-                width: 36, height: 36, borderRadius: 18,
-                alignItems: 'center', justifyContent: 'center',
-                backgroundColor: colors.primary + '14',
-                borderColor: colors.primary + '30', borderWidth: 1,
-              }}
-              activeOpacity={0.7}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <HardDrive size={17} color={colors.primary} />
-            </TouchableOpacity>
+          {/* Right Action Icons: On Files tab show rich reader toolbar with Google Drive logo; on Scan keep minimal */}
+          {navTab === 'files' ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              <TouchableOpacity style={s.hBtn} onPress={handlePickDocument}>
+                <FolderOpen size={19} color={rText} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.hBtn, showDriveModal && { backgroundColor: colors.primary + '25', borderRadius: 8 }]}
+                onPress={() => setShowDriveModal(!showDriveModal)}
+              >
+                <GoogleDriveIcon size={20} />
+              </TouchableOpacity>
+              <TouchableOpacity style={s.hBtn} onPress={() => setShowRecent(true)}>
+                <Clock size={19} color={rText} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={toggleAppTheme}
+                style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 4,
+                  backgroundColor: colors.primary + '16',
+                  borderColor: colors.primary + '35', borderWidth: 1,
+                  paddingHorizontal: 9, paddingVertical: 6,
+                  borderRadius: 16, marginLeft: 2,
+                }}
+                activeOpacity={0.7}
+              >
+                {appTheme === 'light' && <Moon size={14} color={colors.primary} />}
+                {appTheme === 'dark' && <Sun size={14} color={colors.primary} />}
+                {appTheme === 'midnight' && <Star size={14} color={colors.primary} />}
+                {appTheme === 'forest' && <Leaf size={14} color={colors.primary} />}
+                <Text style={{ fontSize: 10.5, fontWeight: '800', color: colors.primary, textTransform: 'capitalize' }}>
+                  {appTheme}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <TouchableOpacity
+                onPress={() => setShowDriveModal(true)}
+                style={{
+                  width: 36, height: 36, borderRadius: 18,
+                  alignItems: 'center', justifyContent: 'center',
+                  backgroundColor: colors.primary + '14',
+                  borderColor: colors.primary + '30', borderWidth: 1,
+                }}
+                activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <GoogleDriveIcon size={19} />
+              </TouchableOpacity>
 
-            <TouchableOpacity
-              onPress={toggleAppTheme}
-              style={{
-                flexDirection: 'row', alignItems: 'center', gap: 5,
-                backgroundColor: colors.primary + '16',
-                borderColor: colors.primary + '35', borderWidth: 1,
-                paddingHorizontal: 11, paddingVertical: 7,
-                borderRadius: 18,
-              }}
-              activeOpacity={0.7}
-            >
-              {appTheme === 'light' && <Moon size={14} color={colors.primary} />}
-              {appTheme === 'dark' && <Sun size={14} color={colors.primary} />}
-              {appTheme === 'midnight' && <Star size={14} color={colors.primary} />}
-              {appTheme === 'forest' && <Leaf size={14} color={colors.primary} />}
-              <Text style={{ fontSize: 11, fontWeight: '800', color: colors.primary, textTransform: 'capitalize' }}>
-                {appTheme}
-              </Text>
-            </TouchableOpacity>
-          </View>
+              <TouchableOpacity
+                onPress={toggleAppTheme}
+                style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 5,
+                  backgroundColor: colors.primary + '16',
+                  borderColor: colors.primary + '35', borderWidth: 1,
+                  paddingHorizontal: 11, paddingVertical: 7,
+                  borderRadius: 18,
+                }}
+                activeOpacity={0.7}
+              >
+                {appTheme === 'light' && <Moon size={14} color={colors.primary} />}
+                {appTheme === 'dark' && <Sun size={14} color={colors.primary} />}
+                {appTheme === 'midnight' && <Star size={14} color={colors.primary} />}
+                {appTheme === 'forest' && <Leaf size={14} color={colors.primary} />}
+                <Text style={{ fontSize: 11, fontWeight: '800', color: colors.primary, textTransform: 'capitalize' }}>
+                  {appTheme}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       );
     }
@@ -4197,7 +4282,7 @@ export default function StandalonePdfReader({
                   style={[s.hBtn, showDriveModal && { backgroundColor: colors.primary + '25', borderRadius: 8 }]}
                   onPress={() => setShowDriveModal(!showDriveModal)}
                 >
-                  <HardDrive size={18} color={colors.primary} />
+                  <GoogleDriveIcon size={18} />
                 </TouchableOpacity>
                 <TouchableOpacity style={s.hBtn} onPress={() => setShowRecent(true)}>
                   <Clock size={18} color={rText} />
@@ -4235,7 +4320,7 @@ export default function StandalonePdfReader({
                   style={[s.hBtn, showDriveModal && { backgroundColor: colors.primary + '25', borderRadius: 8 }]}
                   onPress={() => setShowDriveModal(!showDriveModal)}
                 >
-                  <HardDrive size={18} color={colors.primary} />
+                  <GoogleDriveIcon size={18} />
                 </TouchableOpacity>
                 <TouchableOpacity style={s.hBtn} onPress={() => setShowRecent(true)}>
                   <Clock size={18} color={rText} />
@@ -4920,7 +5005,7 @@ export default function StandalonePdfReader({
                           {file.name}
                         </Text>
                         <Text style={{ fontSize: 10, color: rMuted, marginTop: 2 }}>
-                          Opened {new Date(file.openedAt).toLocaleDateString()}
+                          {file.size ? `${formatRecentFileSize(file.size)} • ` : ''}Opened {new Date(file.openedAt).toLocaleDateString()}
                         </Text>
                       </View>
                     </TouchableOpacity>
@@ -5763,10 +5848,21 @@ function EmptyState({
     <View style={{ flex: 1, backgroundColor: rBg }}>
       {/* ── Content Area (Padded for Bottom Navigation Bar) ── */}
       <View style={{ flex: 1, paddingBottom: 68 + Math.max(bottomInset, 10) }}>
-        <ScrollView
-          contentContainerStyle={{ flexGrow: 1 }}
-          showsVerticalScrollIndicator={false}
-        >
+        {navTab === 'scan' ? (
+          <ScannerStudio
+            primaryColor={primary}
+            isDark={isDark}
+            onOpenPdf={async (uri, name) => {
+              if (onOpenScannedPdf) {
+                await onOpenScannedPdf(uri, name);
+              }
+            }}
+          />
+        ) : (
+          <ScrollView
+            contentContainerStyle={{ flexGrow: 1 }}
+            showsVerticalScrollIndicator={false}
+          >
           {/* ═══════════════════════════════════════════════════════
               TAB 1: HOME
              ═══════════════════════════════════════════════════════ */}
@@ -5830,9 +5926,15 @@ function EmptyState({
                   </View>
                   <Text style={{
                     fontSize: 22, fontWeight: '900', color: rText,
-                    letterSpacing: -0.5, marginBottom: 4,
+                    letterSpacing: -0.5, marginBottom: 2,
                   }}>
-                    Helper PDF Reader
+                    Helper PDF
+                  </Text>
+                  <Text style={{
+                    fontSize: 11, fontWeight: '800', color: primary,
+                    letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 6,
+                  }}>
+                    Reader & Scanner
                   </Text>
                   <Text style={{
                     fontSize: 12.5, color: rMuted, textAlign: 'center',
@@ -5932,7 +6034,7 @@ function EmptyState({
                           {f.name}
                         </Text>
                         <Text style={{ fontSize: 10.5, color: rMuted, marginTop: 2, fontWeight: '500' }}>
-                          {new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                          {f.size ? `${formatRecentFileSize(f.size)} • ` : ''}{new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                         </Text>
                       </TouchableOpacity>
 
@@ -6027,7 +6129,7 @@ function EmptyState({
                   activeOpacity={0.75}
                 >
                   <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: '#0ea5e918', alignItems: 'center', justifyContent: 'center' }}>
-                    <HardDrive size={22} color="#0ea5e9" />
+                    <GoogleDriveIcon size={24} />
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>Google Drive</Text>
@@ -6061,7 +6163,7 @@ function EmptyState({
                   <TouchableOpacity style={{ flex: 1 }} onPress={() => onOpenRecent(f)} activeOpacity={0.7}>
                     <Text style={{ fontSize: 13, fontWeight: '700', color: rText }} numberOfLines={1}>{f.name}</Text>
                     <Text style={{ fontSize: 10.5, color: rMuted, marginTop: 2, fontWeight: '500' }}>
-                      {new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                      {f.size ? `${formatRecentFileSize(f.size)} • ` : ''}{new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                     </Text>
                   </TouchableOpacity>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
@@ -6083,20 +6185,6 @@ function EmptyState({
             </View>
           )}
 
-          {/* ═══════════════════════════════════════════════════════
-              TAB 3: SCAN (CLEAR SCANNER STUDIO)
-             ═══════════════════════════════════════════════════════ */}
-          {navTab === 'scan' && (
-            <ScannerStudio
-              primaryColor={primary}
-              isDark={isDark}
-              onOpenPdf={async (uri, name) => {
-                if (onOpenScannedPdf) {
-                  await onOpenScannedPdf(uri, name);
-                }
-              }}
-            />
-          )}
 
           {/* ═══════════════════════════════════════════════════════
               TAB 4: TOOLS & CONVERTERS HUB
@@ -6122,6 +6210,7 @@ function EmptyState({
             />
           )}
         </ScrollView>
+        )}
       </View>
 
       {/* ── Fixed Bottom Navigation Bar (Adobe Acrobat Style) ── */}

@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Helper PDF Reader",
+    "name": "Helper PDF: Reader & Scanner",
     "slug": "helper-pdf-reader",
     "version": "1.0.0",
     "scheme": "helperpdf",
@@ -16,8 +16,8 @@
       "bundleIdentifier": "com.dkwork.helperpdf",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSCameraUsageDescription": "Helper PDF Reader needs camera access to scan paper documents and convert them to PDF.",
-        "NSPhotoLibraryUsageDescription": "Helper PDF Reader needs photo access to import documents and images to PDF.",
+        "NSCameraUsageDescription": "Helper PDF: Reader & Scanner needs camera access to scan paper documents and convert them to PDF.",
+        "NSPhotoLibraryUsageDescription": "Helper PDF: Reader & Scanner needs photo access to import documents and images to PDF.",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
         }
