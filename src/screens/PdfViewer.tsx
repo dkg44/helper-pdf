@@ -5681,76 +5681,75 @@ function EmptyState({
           contentContainerStyle={{ flexGrow: 1 }}
           showsVerticalScrollIndicator={false}
         >
-          {/* ── Acrobat Top Bar ──────────────────────────────── */}
-          <View style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            paddingHorizontal: 18,
-            paddingTop: 16,
-            paddingBottom: 10,
-          }}>
-            {/* Brand: Logo + App Name */}
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              <View style={{
-                width: 40, height: 40, borderRadius: 12,
-                overflow: 'hidden',
-                shadowColor: primary, shadowOffset: { width: 0, height: 3 },
-                shadowOpacity: 0.3, shadowRadius: 6, elevation: 5,
-              }}>
-                <Image
-                  source={isDark ? appIconDark : appIcon}
-                  style={{ width: 40, height: 40 }}
-                  resizeMode="cover"
-                />
+          {/* ── Acrobat Top Bar (Only visible on Home and Files tabs) ── */}
+          {(navTab === 'home' || navTab === 'files') && (
+            <View style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              paddingHorizontal: 18,
+              paddingTop: 16,
+              paddingBottom: 10,
+            }}>
+              {/* Brand: Logo + App Name */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                <View style={{
+                  width: 38, height: 38, borderRadius: 12,
+                  overflow: 'hidden',
+                  shadowColor: primary, shadowOffset: { width: 0, height: 3 },
+                  shadowOpacity: 0.3, shadowRadius: 6, elevation: 5,
+                }}>
+                  <Image
+                    source={isDark ? appIconDark : appIcon}
+                    style={{ width: 38, height: 38 }}
+                    resizeMode="cover"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '900', color: rText, letterSpacing: -0.3 }} numberOfLines={1}>
+                    Helper PDF reader & Scanner
+                  </Text>
+                </View>
               </View>
-              <View>
-                <Text style={{ fontSize: 17, fontWeight: '900', color: rText, letterSpacing: -0.3 }}>
-                  Helper PDF
-                </Text>
-                <Text style={{ fontSize: 10.5, color: rMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8, marginTop: -2 }}>
-                  Reader
-                </Text>
-              </View>
-            </View>
 
-            {/* Right Action Icons: Cloud Drive + Direct Moon Theme Toggle */}
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              {onOpenDrive && (
+              {/* Right Action Icons: Cloud Drive + Direct Moon Theme Toggle */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                {onOpenDrive && (
+                  <TouchableOpacity
+                    onPress={onOpenDrive}
+                    style={{
+                      width: 38, height: 38, borderRadius: 19,
+                      alignItems: 'center', justifyContent: 'center',
+                      backgroundColor: primary + '14',
+                      borderColor: primary + '30', borderWidth: 1,
+                    }}
+                    activeOpacity={0.7}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <HardDrive size={18} color={primary} />
+                  </TouchableOpacity>
+                )}
+
+                {/* Direct Theme Toggle upon 1-click */}
                 <TouchableOpacity
-                  onPress={onOpenDrive}
+                  onPress={toggleTheme}
                   style={{
-                    width: 38, height: 38, borderRadius: 19,
-                    alignItems: 'center', justifyContent: 'center',
-                    backgroundColor: primary + '14',
-                    borderColor: primary + '30', borderWidth: 1,
+                    flexDirection: 'row', alignItems: 'center', gap: 5,
+                    backgroundColor: primary + '16',
+                    borderColor: primary + '35', borderWidth: 1,
+                    paddingHorizontal: 12, paddingVertical: 8,
+                    borderRadius: 20,
                   }}
                   activeOpacity={0.7}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 >
-                  <HardDrive size={18} color={primary} />
+                  {themeNextIcon[themeKey] ?? <Moon size={17} color={primary} />}
+                  <Text style={{ fontSize: 11.5, fontWeight: '800', color: primary }}>
+                    {themeNextLabel[themeKey] ?? 'Theme'}
+                  </Text>
                 </TouchableOpacity>
-              )}
-
-              {/* Direct Theme Toggle upon 1-click */}
-              <TouchableOpacity
-                onPress={toggleTheme}
-                style={{
-                  flexDirection: 'row', alignItems: 'center', gap: 5,
-                  backgroundColor: primary + '16',
-                  borderColor: primary + '35', borderWidth: 1,
-                  paddingHorizontal: 12, paddingVertical: 8,
-                  borderRadius: 20,
-                }}
-                activeOpacity={0.7}
-              >
-                {themeNextIcon[themeKey] ?? <Moon size={17} color={primary} />}
-                <Text style={{ fontSize: 11.5, fontWeight: '800', color: primary }}>
-                  {themeNextLabel[themeKey] ?? 'Theme'}
-                </Text>
-              </TouchableOpacity>
+              </View>
             </View>
-          </View>
+          )}
 
           {/* ═══════════════════════════════════════════════════════
               TAB 1: HOME
