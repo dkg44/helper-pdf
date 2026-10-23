@@ -28,6 +28,7 @@ import {
   FileText,
 } from 'lucide-react-native';
 import { ScannedPage, detectEarlyCrop, detectEarlyCorners, NO_CROP } from '../services/scannerService';
+import { PerspectiveWarpBridgeRef } from '../services/perspectiveService';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -38,6 +39,7 @@ interface LiveScannerCameraProps {
   onClose: () => void;
   onFinishCapture: (pages: ScannedPage[]) => void;
   primaryColor: string;
+  warpBridgeRef?: React.RefObject<PerspectiveWarpBridgeRef | null>;
 }
 
 export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
@@ -45,9 +47,13 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
   onClose,
   onFinishCapture,
   primaryColor,
+  warpBridgeRef,
 }) => {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [cameraMode, setCameraMode] = useState<CameraCaptureMode>('batch');
+  const [idCardStep, setIdCardStep] = useState<'front' | 'rear'>('front');
+  const [idCardFrontPage, setIdCardFrontPage] = useState<ScannedPage | null>(null);
+  const [processingStatus, setProcessingStatus] = useState<string>('');
   const [torchOn, setTorchOn] = useState(false);
   const [autoClick, setAutoClick] = useState(false);
   const [capturedPages, setCapturedPages] = useState<ScannedPage[]>([]);
@@ -64,6 +70,9 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
       requestCameraPerms();
       setCapturedPages([]);
       setCornersLocked(false);
+      setIdCardStep('front');
+      setIdCardFrontPage(null);
+      setProcessingStatus('');
     }
   }, [visible]);
 
@@ -136,8 +145,51 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
         };
 
         if (cameraMode === 'single') {
-          // In single mode, finish immediately
+          // Single page capture: finish immediately
           onFinishCapture([newPage]);
+        } else if (cameraMode === 'passport') {
+          // Passport mode: finish immediately so user can edit/review the passport document
+          onFinishCapture([newPage]);
+        } else if (cameraMode === 'id_card') {
+          if (idCardStep === 'front') {
+            // Step 1: Front captured. Prompt for rear side
+            setIdCardFrontPage(newPage);
+            setIdCardStep('rear');
+            Alert.alert(
+              'Front Side Captured! 💳',
+              'Now turn over your ID card to scan the REAR (Back) side. Both will be merged into 1 page.',
+              [{ text: 'Scan Rear Side', style: 'default' }]
+            );
+          } else {
+            // Step 2: Rear captured! Combine both photos onto 1 single page
+            setProcessingStatus('Merging Front & Rear into 1-Page Document...');
+            try {
+              if (idCardFrontPage && warpBridgeRef?.current?.combineIdCard) {
+                const combined = await warpBridgeRef.current.combineIdCard(idCardFrontPage.uri, newPage.uri);
+                const combinedPage: ScannedPage = {
+                  id: `idcard_${Date.now()}`,
+                  uri: combined.uri,
+                  originalUri: combined.uri,
+                  rotation: 0,
+                  filter: 'doc',
+                  crop: detectEarlyCrop(combined.width, combined.height),
+                  corners: detectEarlyCorners(combined.width, combined.height),
+                  width: combined.width,
+                  height: combined.height,
+                };
+                setIdCardFrontPage(null);
+                setIdCardStep('front');
+                onFinishCapture([combinedPage]);
+              } else {
+                onFinishCapture([idCardFrontPage || newPage, newPage]);
+              }
+            } catch (combErr) {
+              console.warn('ID combine failed, using pages:', combErr);
+              onFinishCapture([idCardFrontPage || newPage, newPage]);
+            } finally {
+              setProcessingStatus('');
+            }
+          }
         } else {
           // In batch mode, accumulate and keep camera open
           setCapturedPages((prev) => [...prev, newPage]);
@@ -315,9 +367,11 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
                 {cornersLocked
                   ? 'Corners Detected & Locked ✓'
                   : cameraMode === 'id_card'
-                  ? 'Fit ID Card inside box'
+                  ? idCardStep === 'front'
+                    ? '📸 Step 1 of 2: Align FRONT of ID Card'
+                    : '📸 Step 2 of 2: Flip Card & Align REAR (Back)'
                   : cameraMode === 'passport'
-                  ? 'Align Passport booklet'
+                  ? 'Align Passport Photo & Bio-Data Page'
                   : 'Align document inside frame'}
               </Text>
             </View>
@@ -349,7 +403,11 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
             return (
               <TouchableOpacity
                 key={mode.id}
-                onPress={() => setCameraMode(mode.id as CameraCaptureMode)}
+                onPress={() => {
+                  setCameraMode(mode.id as CameraCaptureMode);
+                  setIdCardStep('front');
+                  setIdCardFrontPage(null);
+                }}
                 style={[
                   styles.modeTab,
                   {
@@ -377,15 +435,31 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
 
         {/* ── Bottom Shutter & Batch Accumulator Bar ── */}
         <View style={styles.bottomBar}>
-          {/* Bottom Left: Import from Gallery */}
-          <TouchableOpacity
-            onPress={handleImportGallery}
-            style={styles.galleryIconBtn}
-            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-          >
-            <FolderOpen size={24} color="#ffffff" />
-            <Text style={styles.bottomBtnLabel}>Gallery</Text>
-          </TouchableOpacity>
+          {/* Bottom Left: Import from Gallery or Captured Front Preview */}
+          {cameraMode === 'id_card' && idCardStep === 'rear' && idCardFrontPage ? (
+            <TouchableOpacity
+              onPress={() => {
+                setIdCardStep('front');
+                setIdCardFrontPage(null);
+              }}
+              style={styles.frontThumbContainer}
+              activeOpacity={0.8}
+            >
+              <Image source={{ uri: idCardFrontPage.uri }} style={styles.frontThumbImg} />
+              <View style={styles.frontBadge}>
+                <Text style={styles.frontBadgeText}>Front ✓</Text>
+              </View>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              onPress={handleImportGallery}
+              style={styles.galleryIconBtn}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <FolderOpen size={24} color="#ffffff" />
+              <Text style={styles.bottomBtnLabel}>Gallery</Text>
+            </TouchableOpacity>
+          )}
 
           {/* Center: Circular Shutter Button */}
           <TouchableOpacity
@@ -435,6 +509,14 @@ export const LiveScannerCamera: React.FC<LiveScannerCameraProps> = ({
           )}
         </View>
       </SafeAreaView>
+
+      {/* Processing / Combining Overlay */}
+      {processingStatus ? (
+        <View style={styles.processingOverlay}>
+          <ActivityIndicator size="large" color="#ffffff" />
+          <Text style={styles.processingText}>{processingStatus}</Text>
+        </View>
+      ) : null}
     </View>
   );
 };
@@ -658,5 +740,50 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  frontThumbContainer: {
+    width: 60,
+    height: 46,
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#38bdf8',
+    position: 'relative',
+    backgroundColor: '#1e293b',
+  },
+  frontThumbImg: {
+    width: '100%',
+    height: '100%',
+    resizeMode: 'cover',
+  },
+  frontBadge: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(14,165,233,0.9)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 1,
+  },
+  frontBadgeText: {
+    color: '#ffffff',
+    fontSize: 9,
+    fontWeight: '800',
+  },
+  processingOverlay: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 99999,
+    padding: 24,
+  },
+  processingText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 14,
+    textAlign: 'center',
   },
 });

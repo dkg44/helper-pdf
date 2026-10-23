@@ -90,6 +90,7 @@ import {
   deleteSavedScanDoc,
   renameSavedScanDoc,
   moveSavedScanDoc,
+  updateSavedScanDoc,
   clearFolderDocs,
   createBlankScanPage,
   detectEarlyCrop,
@@ -161,6 +162,10 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   const [showFolderMenuModal, setShowFolderMenuModal] = useState(false);
   const [showRenameFolderModal, setShowRenameFolderModal] = useState(false);
   const [renameFolderText, setRenameFolderText] = useState('');
+
+  // PDF page extraction loader state
+  const [isExtractingPdf, setIsExtractingPdf] = useState(false);
+  const [extractStatusText, setExtractStatusText] = useState('Extracting PDF pages...');
 
   // Layout size for draggable crop canvas
   const [cropLayout, setCropLayout] = useState({ width: SCREEN_W - 32, height: SCREEN_H * 0.58 });
@@ -395,30 +400,78 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
         const destUri = `${FileSystem.documentDirectory}${Date.now()}_${file.name}`;
         await FileSystem.copyAsync({ from: file.uri, to: destUri });
 
+        setIsExtractingPdf(true);
+        setExtractStatusText(`Splitting "${file.name}" into editable pages...`);
+
+        let extractedPages: ScannedPage[] = [];
+        try {
+          if (warpBridgeRef.current?.extractPdfPages) {
+            const pagesFromPdf = await warpBridgeRef.current.extractPdfPages(destUri);
+            if (pagesFromPdf && pagesFromPdf.length > 0) {
+              extractedPages = pagesFromPdf.map((p, idx) => ({
+                id: `scan_${Date.now()}_${idx}`,
+                uri: p.uri,
+                originalUri: p.uri,
+                rotation: 0,
+                filter: 'orig',
+                crop: detectEarlyCrop(p.width, p.height),
+                corners: detectEarlyCorners(p.width, p.height),
+                width: p.width,
+                height: p.height,
+              }));
+            }
+          }
+        } catch (extErr: any) {
+          console.warn('PDF extraction bridge notice:', extErr);
+        }
+
+        if (extractedPages.length === 0) {
+          const blank = await createBlankScanPage();
+          extractedPages = [{
+            ...blank,
+            id: `scan_${Date.now()}_0`,
+          }];
+        }
+
         const newDoc: SavedScanDoc = {
           id: `doc_${Date.now()}`,
           title: cleanName,
           pdfUri: destUri,
-          pageCount: 1,
-          thumbnailUri: '',
+          pageCount: extractedPages.length,
+          thumbnailUri: extractedPages[0]?.uri || '',
           folderId: selectedFolderId,
           createdAt: Date.now(),
           fileSize: file.size,
+          pages: extractedPages,
         };
         await addSavedScanDoc(newDoc);
         await loadFoldersAndDocs();
-        Alert.alert(
-          'PDF Imported',
-          `"${file.name}" has been added to ${selectedFolderId ? 'this folder' : 'your library'}. Would you like to open it now?`,
-          [
-            { text: 'Later', style: 'cancel' },
-            { text: 'Open Now', onPress: () => onOpenPdf(destUri, `${cleanName}.pdf`) },
-          ]
-        );
+
+        setPages(extractedPages);
+        setSelectedIdx(0);
+        setDocTitle(cleanName);
+        setCurrentDoc(newDoc);
+        setStage('doc_detail');
       }
     } catch (e: any) {
       Alert.alert('Import Failed', e?.message || 'Could not import PDF.');
+    } finally {
+      setIsExtractingPdf(false);
     }
+  };
+
+  const handleSwapPages = async (fromIdx: number, toIdx: number) => {
+    setPages((prev) => {
+      const next = [...prev];
+      const temp = next[fromIdx];
+      next[fromIdx] = next[toIdx];
+      next[toIdx] = temp;
+
+      if (currentDoc) {
+        updateSavedScanDoc(currentDoc.id, { pages: next });
+      }
+      return next;
+    });
   };
 
   const handleCreateBlankDocument = async () => {
@@ -1275,6 +1328,36 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                   <View style={styles.pageNumberBadge}>
                     <Text style={styles.pageNumberText}>{idx + 1}</Text>
                   </View>
+
+                  {/* Reorder Buttons (Move Left & Move Right) */}
+                  {pages.length > 1 && (
+                    <View style={styles.pageReorderRow}>
+                      {idx > 0 && (
+                        <TouchableOpacity
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            handleSwapPages(idx, idx - 1);
+                          }}
+                          style={styles.pageReorderBtn}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <ChevronLeft size={15} color="#ffffff" />
+                        </TouchableOpacity>
+                      )}
+                      {idx < pages.length - 1 && (
+                        <TouchableOpacity
+                          onPress={(e) => {
+                            e.stopPropagation?.();
+                            handleSwapPages(idx, idx + 1);
+                          }}
+                          style={styles.pageReorderBtn}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <ChevronRight size={15} color="#ffffff" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
 
                   {/* Quick Edit Overlay Bar */}
                   <View style={styles.pageCardActions}>
@@ -2188,7 +2271,23 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
         onClose={() => setShowLiveCamera(false)}
         onFinishCapture={handleFinishLiveCamera}
         primaryColor={primaryColor}
+        warpBridgeRef={warpBridgeRef}
       />
+
+      {/* ── Modal: PDF Page Extraction Loader ── */}
+      <Modal visible={isExtractingPdf} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.dialogBox, { backgroundColor: isDark ? '#1e293b' : '#ffffff', alignItems: 'center', padding: 24 }]}>
+            <ActivityIndicator size="large" color={primaryColor} />
+            <Text style={[styles.dialogTitle, { color: textColor, marginTop: 14, textAlign: 'center' }]}>
+              Importing & Splitting PDF
+            </Text>
+            <Text style={{ fontSize: 13, color: mutedColor, marginTop: 6, textAlign: 'center' }}>
+              {extractStatusText}
+            </Text>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -2783,6 +2882,22 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 11,
     fontWeight: '800',
+  },
+  pageReorderRow: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  pageReorderBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   detailBottomBar: {
     flexDirection: 'row',

@@ -452,3 +452,10 @@ export const moveSavedScanDoc = async (docId: string, targetFolderId: string | n
   const updated = existing.map((d) => (d.id === docId ? { ...d, folderId: targetFolderId } : d));
   await saveScanDocs(updated);
 };
+
+export const updateSavedScanDoc = async (docId: string, updates: Partial<SavedScanDoc>): Promise<void> => {
+  const existing = await loadSavedScanDocs();
+  const updated = existing.map((d) => (d.id === docId ? { ...d, ...updates } : d));
+  await saveScanDocs(updated);
+};
+

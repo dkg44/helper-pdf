@@ -24,6 +24,31 @@ if (Platform.OS !== 'web') {
 
 import appIcon from '../assets/icon.png';
 import appIconDark from '../assets/icon_dark.png';
+
+// ── Persistent Cached Brand Logo (Zero Flicker, Zero Fade Duration, Never Disappears) ──
+const CachedAppLogo = React.memo(({ isDark, size = 33 }: { isDark: boolean; size?: number }) => (
+  <View style={{
+    width: size, height: size, borderRadius: size * 0.25,
+    overflow: 'hidden',
+    backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)',
+    borderWidth: 1,
+    borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)',
+  }}>
+    <Image
+      source={appIcon}
+      style={{ width: size, height: size, position: 'absolute', opacity: isDark ? 0 : 1 }}
+      resizeMode="cover"
+      fadeDuration={0}
+    />
+    <Image
+      source={appIconDark}
+      style={{ width: size, height: size, position: 'absolute', opacity: isDark ? 1 : 0 }}
+      resizeMode="cover"
+      fadeDuration={0}
+    />
+  </View>
+));
+
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Speech from 'expo-speech';
@@ -4099,21 +4124,7 @@ export default function StandalonePdfReader({
         }]}>
           {/* Logo + Brand: Helper PDF / reader & scanner */}
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 9 }}>
-            <View style={{
-              width: 33, height: 33, borderRadius: 8.5,
-              overflow: 'hidden',
-              backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)',
-              borderWidth: 1,
-              borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.08)',
-              shadowColor: colors.primary, shadowOffset: { width: 0, height: 1.5 },
-              shadowOpacity: 0.18, shadowRadius: 3, elevation: 2,
-            }}>
-              <Image
-                source={isDark ? appIconDark : appIcon}
-                style={{ width: 33, height: 33 }}
-                resizeMode="cover"
-              />
-            </View>
+            <CachedAppLogo isDark={isDark} size={33} />
             <View style={{ justifyContent: 'center' }}>
               <Text style={{ fontSize: 15.5, fontWeight: '900', color: rText, letterSpacing: -0.3, lineHeight: 18 }} numberOfLines={1}>
                 Helper PDF
@@ -4226,6 +4237,10 @@ export default function StandalonePdfReader({
             ) : (
               <View style={{ width: 14 }} />
             )}
+
+            <View style={{ marginLeft: 2, marginRight: 4 }}>
+              <CachedAppLogo isDark={isDark} size={27} />
+            </View>
 
             {hasPdf && !showDriveModal && (
               <TouchableOpacity
