@@ -39,8 +39,9 @@ helperpdf/
 ├── app.json                       # Expo config (bundle ID, permissions, intent filters)
 ├── src/
 │   ├── assets/
-│   │   ├── logo_light.png
-│   │   └── logo_dark.png
+│   │   ├── icon.png               # App icon (light)
+│   │   ├── icon_dark.png          # App icon (dark)
+│   │   └── adaptive_icon.png      # Android adaptive icon
 │   ├── context/
 │   │   └── ThemeContext.tsx       # Local-only theme (AsyncStorage, no server)
 │   ├── hooks/
