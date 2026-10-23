@@ -16,6 +16,8 @@
       "bundleIdentifier": "com.dkwork.helperpdf",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "Helper PDF Reader needs camera access to scan paper documents and convert them to PDF.",
+        "NSPhotoLibraryUsageDescription": "Helper PDF Reader needs photo access to import documents and images to PDF.",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
         }
@@ -31,7 +33,8 @@
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.INTERNET",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA"
       ],
       "intentFilters": [
         {

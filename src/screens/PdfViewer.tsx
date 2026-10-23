@@ -29,6 +29,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Speech from 'expo-speech';
 import * as Clipboard from 'expo-clipboard';
 import * as Sharing from 'expo-sharing';
+import * as ImagePicker from 'expo-image-picker';
+import * as Print from 'expo-print';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WebView } from 'react-native-webview';
 const WebViewAny = WebView as any;
@@ -39,7 +41,8 @@ import {
   Clock, Trash2, Copy, Hash, RefreshCw, ChevronDown, Sparkles, MoreHorizontal,
   BookOpen, ListTree, HardDrive, Cloud, Plus, Folder, Lock, ExternalLink, Link,
   LogOut, Check, MoreVertical, Download, CheckCircle2, Edit3,
-  Moon, Sun, Star, Leaf, Share2, Home, Wrench
+  Moon, Sun, Star, Leaf, Share2, Home, Wrench,
+  Camera, RotateCw, ScanLine, FilePlus, Wand2, Type
 } from 'lucide-react-native';
 import { useTheme } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -4292,6 +4295,13 @@ export default function StandalonePdfReader({
             themeKey={appTheme}
             toggleTheme={toggleAppTheme}
             onTheme={() => setShowTheme(true)}
+            onOpenScannedPdf={async (uri: string, name: string) => {
+              try {
+                await openPdf(uri, name);
+              } catch (err: any) {
+                Alert.alert('Error', err?.message || 'Could not open generated PDF.');
+              }
+            }}
           />
         )
       ) : (
@@ -5308,6 +5318,16 @@ export default function StandalonePdfReader({
 // ---------------------------------------------------------------------------
 // Acrobat-Style Home Screen sub-component
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Acrobat-Style Home Screen & Clear Scanner Sub-Component
+// ---------------------------------------------------------------------------
+interface ScannedPage {
+  id: string;
+  uri: string;
+  rotation: number; // 0, 90, 180, 270
+  filter: 'doc' | 'color' | 'bw' | 'orig';
+}
+
 function EmptyState({
   rBg,
   rText,
@@ -5322,6 +5342,7 @@ function EmptyState({
   themeKey,
   toggleTheme,
   onTheme,
+  onOpenScannedPdf,
 }: {
   rBg: string;
   rText: string;
@@ -5336,10 +5357,28 @@ function EmptyState({
   themeKey: string;
   toggleTheme: () => Promise<void>;
   onTheme: () => void;
+  onOpenScannedPdf?: (uri: string, name: string) => Promise<void>;
 }) {
+  const insets = useSafeAreaInsets();
+  const bottomInset = insets?.bottom ?? 0;
   const isDark = themeKey !== 'light';
-  const [navTab, setNavTab] = useState<'home' | 'files' | 'tools'>('home');
+
+  // Navigation tab: 'home' | 'files' | 'scan' | 'tools'
+  const [navTab, setNavTab] = useState<'home' | 'files' | 'scan' | 'tools'>('home');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // ── Clear Scanner State ─────────────────────────────────────
+  const [scannedPages, setScannedPages] = useState<ScannedPage[]>([]);
+  const [selectedPageIndex, setSelectedPageIndex] = useState<number>(0);
+  const [scanFilter, setScanFilter] = useState<'doc' | 'color' | 'bw' | 'orig'>('doc');
+  const [scanDocTitle, setScanDocTitle] = useState('');
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+
+  // ── Text to PDF Converter State ─────────────────────────────
+  const [showTextToPdfModal, setShowTextToPdfModal] = useState(false);
+  const [textDocTitle, setTextDocTitle] = useState('');
+  const [textDocBody, setTextDocBody] = useState('');
+  const [isConvertingText, setIsConvertingText] = useState(false);
 
   // 1-click theme button icons & labels
   const themeNextIcon: Record<string, React.ReactNode> = {
@@ -5393,21 +5432,305 @@ function EmptyState({
     }
   };
 
+  // ── Clear Scanner Actions ───────────────────────────────────
+  const handleScanWithCamera = async () => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Camera Permission', 'Camera permission is required to scan paper documents.');
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.95,
+        allowsEditing: false,
+      });
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const newPage: ScannedPage = {
+          id: 'scan_' + Date.now(),
+          uri: result.assets[0].uri,
+          rotation: 0,
+          filter: scanFilter,
+        };
+        setScannedPages(prev => {
+          const updated = [...prev, newPage];
+          setSelectedPageIndex(updated.length - 1);
+          return updated;
+        });
+        if (!scanDocTitle) {
+          const now = new Date();
+          setScanDocTitle(`Scan_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`);
+        }
+        setNavTab('scan');
+      }
+    } catch (err: any) {
+      Alert.alert('Camera Error', err?.message || 'Could not access camera.');
+    }
+  };
+
+  const handleImportPhotosToScan = async () => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Photo Access', 'Permission is required to import documents from photos.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        allowsMultipleSelection: true,
+        quality: 0.95,
+      });
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const newPages: ScannedPage[] = result.assets.map((a, i) => ({
+          id: 'scan_' + Date.now() + '_' + i,
+          uri: a.uri,
+          rotation: 0,
+          filter: scanFilter,
+        }));
+        setScannedPages(prev => {
+          const updated = [...prev, ...newPages];
+          setSelectedPageIndex(updated.length - 1);
+          return updated;
+        });
+        if (!scanDocTitle) {
+          const now = new Date();
+          setScanDocTitle(`Doc_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`);
+        }
+        setNavTab('scan');
+      }
+    } catch (err: any) {
+      Alert.alert('Photo Error', err?.message || 'Could not import photos.');
+    }
+  };
+
+  const handleRotatePage = (idx: number) => {
+    setScannedPages(prev => prev.map((p, i) => i === idx ? { ...p, rotation: (p.rotation + 90) % 360 } : p));
+  };
+
+  const handleDeletePage = (idx: number) => {
+    setScannedPages(prev => {
+      const filtered = prev.filter((_, i) => i !== idx);
+      if (selectedPageIndex >= filtered.length) {
+        setSelectedPageIndex(Math.max(0, filtered.length - 1));
+      }
+      return filtered;
+    });
+  };
+
+  const handleApplyFilter = (filterType: 'doc' | 'color' | 'bw' | 'orig') => {
+    setScanFilter(filterType);
+    setScannedPages(prev => prev.map(p => ({ ...p, filter: filterType })));
+  };
+
+  // ── Convert Scanned Pages to PDF via expo-print ─────────────
+  const handleCompileScannedPdf = async () => {
+    if (scannedPages.length === 0) {
+      Alert.alert('No Pages', 'Please capture or import at least one page to create a PDF.');
+      return;
+    }
+    setIsGeneratingPdf(true);
+    try {
+      const pageHtmlPromises = scannedPages.map(async (p) => {
+        let imgSrc = p.uri;
+        try {
+          const b64 = await FileSystem.readAsStringAsync(p.uri, { encoding: 'base64' });
+          imgSrc = `data:image/jpeg;base64,${b64}`;
+        } catch {}
+
+        let filterCss = '';
+        if (p.filter === 'doc') {
+          // Clear Scanner document mode: high contrast, brightened paper, crisp ink
+          filterCss = 'filter: contrast(170%) brightness(115%) grayscale(100%);';
+        } else if (p.filter === 'color') {
+          // Magic Color: enhanced saturation and contrast
+          filterCss = 'filter: contrast(135%) brightness(108%) saturate(130%);';
+        } else if (p.filter === 'bw') {
+          // Pure Black & White photocopy
+          filterCss = 'filter: grayscale(100%) contrast(220%);';
+        }
+
+        return `
+          <div class="page">
+            <img src="${imgSrc}" class="scan-img" style="transform: rotate(${p.rotation}deg); ${filterCss}" />
+          </div>
+        `;
+      });
+
+      const pagesHtml = await Promise.all(pageHtmlPromises);
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no" />
+          <style>
+            @page { size: A4 portrait; margin: 0; }
+            * { box-sizing: border-box; }
+            body { margin: 0; padding: 0; background-color: #ffffff; }
+            .page {
+              width: 100vw;
+              height: 100vh;
+              page-break-after: always;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              padding: 6mm;
+              overflow: hidden;
+            }
+            .page:last-child {
+              page-break-after: avoid;
+            }
+            .scan-img {
+              max-width: 100%;
+              max-height: 100%;
+              object-fit: contain;
+              image-rendering: -webkit-optimize-contrast;
+            }
+          </style>
+        </head>
+        <body>
+          ${pagesHtml.join('')}
+        </body>
+        </html>
+      `;
+
+      const { uri: generatedUri } = await Print.printToFileAsync({ html });
+      const rawTitle = scanDocTitle.trim() || `Scan_${Date.now()}`;
+      const finalName = rawTitle.toLowerCase().endsWith('.pdf') ? rawTitle : `${rawTitle}.pdf`;
+
+      const destUri = `${FileSystem.documentDirectory}${Date.now()}_${finalName}`;
+      await FileSystem.copyAsync({ from: generatedUri, to: destUri });
+
+      // Clean up scanner state
+      setScannedPages([]);
+      setScanDocTitle('');
+
+      // Open directly in PDF Reader!
+      if (onOpenScannedPdf) {
+        await onOpenScannedPdf(destUri, finalName);
+      }
+    } catch (err: any) {
+      Alert.alert('Scan Compilation Failed', err?.message || 'Could not compile scanned pages into PDF.');
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
+
+  // ── Convert Text / Notes to PDF ─────────────────────────────
+  const handleConvertTextToPdf = async () => {
+    const title = textDocTitle.trim() || 'Untitled Note';
+    const body = textDocBody.trim();
+    if (!body) {
+      Alert.alert('Empty Content', 'Please enter some text or notes to generate a PDF.');
+      return;
+    }
+    setIsConvertingText(true);
+    try {
+      const nowStr = new Date().toLocaleDateString('en-IN', {
+        day: 'numeric', month: 'long', year: 'numeric',
+      });
+
+      const paragraphs = body.split('\n\n').map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`).join('');
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <style>
+            @page { size: A4; margin: 20mm; }
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+              color: #1e293b;
+              line-height: 1.65;
+              padding: 0;
+              margin: 0;
+            }
+            .header {
+              border-bottom: 2px solid ${primary};
+              padding-bottom: 12px;
+              margin-bottom: 24px;
+            }
+            h1 {
+              font-size: 26px;
+              margin: 0 0 6px 0;
+              color: #0f172a;
+              font-weight: 800;
+            }
+            .meta {
+              font-size: 11px;
+              color: #64748b;
+              text-transform: uppercase;
+              letter-spacing: 0.8px;
+            }
+            p {
+              font-size: 14px;
+              margin: 0 0 16px 0;
+              color: #334155;
+              text-align: justify;
+            }
+            .footer {
+              margin-top: 40px;
+              padding-top: 10px;
+              border-top: 1px solid #e2e8f0;
+              font-size: 10px;
+              color: #94a3b8;
+              text-align: center;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>${title}</h1>
+            <div class="meta">Created on ${nowStr} • Generated by Helper PDF Reader</div>
+          </div>
+          ${paragraphs}
+          <div class="footer">Page 1 • Helper PDF Document Converter</div>
+        </body>
+        </html>
+      `;
+
+      const { uri: generatedUri } = await Print.printToFileAsync({ html });
+      const finalName = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`;
+      const destUri = `${FileSystem.documentDirectory}${Date.now()}_${finalName}`;
+      await FileSystem.copyAsync({ from: generatedUri, to: destUri });
+
+      setShowTextToPdfModal(false);
+      setTextDocTitle('');
+      setTextDocBody('');
+
+      if (onOpenScannedPdf) {
+        await onOpenScannedPdf(destUri, finalName);
+      }
+    } catch (err: any) {
+      Alert.alert('PDF Creation Error', err?.message || 'Could not generate PDF from text.');
+    } finally {
+      setIsConvertingText(false);
+    }
+  };
+
   const quickTools = [
+    {
+      title: 'Scan Document',
+      sub: 'Clear Scanner mode',
+      icon: <ScanLine size={24} color="#ffffff" />,
+      bg: primary,
+      textColor: '#ffffff',
+      onPress: () => setNavTab('scan'),
+    },
     {
       title: 'Open PDF',
       sub: 'From device storage',
-      icon: <FolderOpen size={24} color="#ffffff" />,
-      bg: primary,
-      textColor: '#ffffff',
+      icon: <FolderOpen size={24} color={primary} />,
+      bg: primary + '14',
+      border: primary + '35',
+      textColor: rText,
       onPress: onPick,
     },
     {
       title: 'Google Drive',
-      sub: 'Browse cloud documents',
-      icon: <HardDrive size={24} color={primary} />,
-      bg: primary + '14',
-      border: primary + '35',
+      sub: 'Cloud storage stream',
+      icon: <HardDrive size={24} color="#0ea5e9" />,
+      bg: '#0ea5e914',
+      border: '#0ea5e935',
       textColor: rText,
       onPress: onOpenDrive,
     },
@@ -5420,532 +5743,1046 @@ function EmptyState({
       textColor: rText,
       onPress: onPick,
     },
-    {
-      title: 'DOCX Support',
-      sub: 'Word documents to PDF',
-      icon: <BookOpen size={24} color="#059669" />,
-      bg: '#05966914',
-      border: '#05966935',
-      textColor: rText,
-      onPress: onPick,
-    },
   ];
 
-  const toolsList = [
-    { icon: <Search size={22} color={primary} />, title: 'In-PDF Full Text Search', desc: 'Find keywords, phrases, and references across all pages.' },
-    { icon: <Volume2 size={22} color="#8b5cf6" />, title: 'Text to Speech (TTS)', desc: 'Listen to articles, books, and study material with custom speed.' },
-    { icon: <Bookmark size={22} color="#f59e0b" />, title: 'Bookmarks & Index', desc: 'Jump instantly between chapters and save key pages.' },
-    { icon: <ZoomIn size={22} color="#0ea5e9" />, title: 'Fluid Pinch-to-Zoom', desc: 'Smooth multi-touch gestures and full-screen reading mode.' },
-    { icon: <BookOpen size={22} color="#059669" />, title: 'Word (DOCX) Reading', desc: 'View Microsoft Word .docx files alongside PDFs.' },
-    { icon: <Share2 size={22} color="#ec4899" />, title: 'Share & Open With', desc: 'Export and open files directly in Adobe Acrobat and other apps.' },
-    { icon: <Moon size={22} color="#6366f1" />, title: 'Eye-Care Themes', desc: 'White, Warm Sepia, OLED Deep Dark, and Night Forest.' },
-  ];
+  const currentPage = scannedPages[selectedPageIndex] || scannedPages[0];
 
   return (
     <View style={{ flex: 1, backgroundColor: rBg }}>
-      <ScrollView
-        contentContainerStyle={{ flexGrow: 1, paddingBottom: 90 }}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* ── Acrobat Top Bar ──────────────────────────────── */}
-        <View style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingHorizontal: 18,
-          paddingTop: 16,
-          paddingBottom: 12,
-        }}>
-          {/* Brand: Logo + App Name */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <View style={{
-              width: 40, height: 40, borderRadius: 12,
-              overflow: 'hidden',
-              shadowColor: primary, shadowOffset: { width: 0, height: 3 },
-              shadowOpacity: 0.3, shadowRadius: 6, elevation: 5,
-            }}>
-              <Image
-                source={isDark ? appIconDark : appIcon}
-                style={{ width: 40, height: 40 }}
-                resizeMode="cover"
-              />
-            </View>
-            <View>
-              <Text style={{ fontSize: 17, fontWeight: '900', color: rText, letterSpacing: -0.3 }}>
-                Helper PDF
-              </Text>
-              <Text style={{ fontSize: 10.5, color: rMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8, marginTop: -2 }}>
-                Reader
-              </Text>
-            </View>
-          </View>
-
-          {/* Right Action Icons: Cloud Drive + Direct Moon Theme Toggle */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            {onOpenDrive && (
-              <TouchableOpacity
-                onPress={onOpenDrive}
-                style={{
-                  width: 38, height: 38, borderRadius: 19,
-                  alignItems: 'center', justifyContent: 'center',
-                  backgroundColor: primary + '14',
-                  borderColor: primary + '30', borderWidth: 1,
-                }}
-                activeOpacity={0.7}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <HardDrive size={18} color={primary} />
-              </TouchableOpacity>
-            )}
-
-            {/* Direct Theme Toggle upon 1-click */}
-            <TouchableOpacity
-              onPress={toggleTheme}
-              style={{
-                flexDirection: 'row', alignItems: 'center', gap: 5,
-                backgroundColor: primary + '16',
-                borderColor: primary + '35', borderWidth: 1,
-                paddingHorizontal: 12, paddingVertical: 8,
-                borderRadius: 20,
-              }}
-              activeOpacity={0.7}
-            >
-              {themeNextIcon[themeKey] ?? <Moon size={17} color={primary} />}
-              <Text style={{ fontSize: 11.5, fontWeight: '800', color: primary }}>
-                {themeNextLabel[themeKey] ?? 'Theme'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* ── Acrobat Search Bar ────────────────────────────── */}
-        <View style={{ paddingHorizontal: 18, marginTop: 4, marginBottom: 14 }}>
+      {/* ── Content Area (Padded for Bottom Navigation Bar) ── */}
+      <View style={{ flex: 1, paddingBottom: 68 + Math.max(bottomInset, 10) }}>
+        <ScrollView
+          contentContainerStyle={{ flexGrow: 1 }}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* ── Acrobat Top Bar ──────────────────────────────── */}
           <View style={{
             flexDirection: 'row',
             alignItems: 'center',
-            backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-            borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
-            borderWidth: 1,
-            borderRadius: 14,
-            paddingHorizontal: 12,
-            paddingVertical: Platform.OS === 'ios' ? 10 : 6,
-            gap: 10,
+            justifyContent: 'space-between',
+            paddingHorizontal: 18,
+            paddingTop: 16,
+            paddingBottom: 10,
           }}>
-            <Search size={18} color={rMuted} />
-            <TextInput
-              style={{
-                flex: 1,
-                fontSize: 13.5,
-                color: rText,
-                paddingVertical: 0,
-              }}
-              placeholder="Search PDF files and documents..."
-              placeholderTextColor={rMuted}
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              clearButtonMode="while-editing"
-            />
-            {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <X size={16} color={rMuted} />
-              </TouchableOpacity>
-            )}
-          </View>
-        </View>
+            {/* Brand: Logo + App Name */}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <View style={{
+                width: 40, height: 40, borderRadius: 12,
+                overflow: 'hidden',
+                shadowColor: primary, shadowOffset: { width: 0, height: 3 },
+                shadowOpacity: 0.3, shadowRadius: 6, elevation: 5,
+              }}>
+                <Image
+                  source={isDark ? appIconDark : appIcon}
+                  style={{ width: 40, height: 40 }}
+                  resizeMode="cover"
+                />
+              </View>
+              <View>
+                <Text style={{ fontSize: 17, fontWeight: '900', color: rText, letterSpacing: -0.3 }}>
+                  Helper PDF
+                </Text>
+                <Text style={{ fontSize: 10.5, color: rMuted, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8, marginTop: -2 }}>
+                  Reader
+                </Text>
+              </View>
+            </View>
 
-        {/* ── Acrobat Navigation Tabs (Home | Files | Tools) ── */}
-        <View style={{
-          flexDirection: 'row',
-          borderBottomWidth: 1,
-          borderBottomColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
-          paddingHorizontal: 18,
-          marginBottom: 18,
-        }}>
-          {[
-            { key: 'home',  label: 'Home',  icon: <Home size={16} /> },
-            { key: 'files', label: 'Files', icon: <FolderOpen size={16} /> },
-            { key: 'tools', label: 'Tools', icon: <Wrench size={16} /> },
-          ].map((t) => {
-            const active = navTab === t.key;
-            return (
+            {/* Right Action Icons: Cloud Drive + Direct Moon Theme Toggle */}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              {onOpenDrive && (
+                <TouchableOpacity
+                  onPress={onOpenDrive}
+                  style={{
+                    width: 38, height: 38, borderRadius: 19,
+                    alignItems: 'center', justifyContent: 'center',
+                    backgroundColor: primary + '14',
+                    borderColor: primary + '30', borderWidth: 1,
+                  }}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <HardDrive size={18} color={primary} />
+                </TouchableOpacity>
+              )}
+
+              {/* Direct Theme Toggle upon 1-click */}
               <TouchableOpacity
-                key={t.key}
-                onPress={() => setNavTab(t.key as any)}
+                onPress={toggleTheme}
                 style={{
-                  flex: 1,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 6,
-                  paddingVertical: 11,
-                  borderBottomWidth: 2.5,
-                  borderBottomColor: active ? primary : 'transparent',
+                  flexDirection: 'row', alignItems: 'center', gap: 5,
+                  backgroundColor: primary + '16',
+                  borderColor: primary + '35', borderWidth: 1,
+                  paddingHorizontal: 12, paddingVertical: 8,
+                  borderRadius: 20,
                 }}
                 activeOpacity={0.7}
               >
-                {React.cloneElement(t.icon, { color: active ? primary : rMuted })}
-                <Text style={{
-                  fontSize: 13,
-                  fontWeight: active ? '800' : '600',
-                  color: active ? primary : rMuted,
-                }}>
-                  {t.label}
+                {themeNextIcon[themeKey] ?? <Moon size={17} color={primary} />}
+                <Text style={{ fontSize: 11.5, fontWeight: '800', color: primary }}>
+                  {themeNextLabel[themeKey] ?? 'Theme'}
                 </Text>
               </TouchableOpacity>
-            );
-          })}
-        </View>
+            </View>
+          </View>
 
-        {/* ── TAB CONTENT ───────────────────────────────────── */}
-
-        {/* 1. HOME TAB */}
-        {navTab === 'home' && (
-          <View>
-            {/* Hero / Brand banner (when not searching) */}
-            {!searchQuery && (
-              <View style={{
-                alignItems: 'center',
-                paddingTop: 10,
-                paddingBottom: 22,
-                paddingHorizontal: 24,
-              }}>
+          {/* ═══════════════════════════════════════════════════════
+              TAB 1: HOME
+             ═══════════════════════════════════════════════════════ */}
+          {navTab === 'home' && (
+            <View>
+              {/* Acrobat Search Bar */}
+              <View style={{ paddingHorizontal: 18, marginTop: 4, marginBottom: 14 }}>
                 <View style={{
-                  width: 90, height: 90, borderRadius: 24,
-                  overflow: 'hidden',
-                  shadowColor: primary, shadowOffset: { width: 0, height: 8 },
-                  shadowOpacity: 0.35, shadowRadius: 16,
-                  elevation: 10, marginBottom: 12,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                  borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+                  borderWidth: 1,
+                  borderRadius: 14,
+                  paddingHorizontal: 12,
+                  paddingVertical: Platform.OS === 'ios' ? 10 : 6,
+                  gap: 10,
                 }}>
-                  <Image
-                    source={isDark ? appIconDark : appIcon}
-                    style={{ width: 90, height: 90 }}
-                    resizeMode="cover"
+                  <Search size={18} color={rMuted} />
+                  <TextInput
+                    style={{
+                      flex: 1,
+                      fontSize: 13.5,
+                      color: rText,
+                      paddingVertical: 0,
+                    }}
+                    placeholder="Search PDF files and documents..."
+                    placeholderTextColor={rMuted}
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                    clearButtonMode="while-editing"
                   />
-                </View>
-                <Text style={{
-                  fontSize: 22, fontWeight: '900', color: rText,
-                  letterSpacing: -0.5, marginBottom: 4,
-                }}>
-                  Helper PDF Reader
-                </Text>
-                <Text style={{
-                  fontSize: 12.5, color: rMuted, textAlign: 'center',
-                  lineHeight: 18, maxWidth: 300,
-                }}>
-                  Read, listen & search documents — on device or cloud.
-                </Text>
-              </View>
-            )}
-
-            {/* Quick Action Cards (Acrobat-style 2x2 grid) */}
-            {!searchQuery && (
-              <View style={{ paddingHorizontal: 18, marginBottom: 24 }}>
-                <Text style={{
-                  fontSize: 11, fontWeight: '800', color: rMuted,
-                  letterSpacing: 1.1, textTransform: 'uppercase', marginBottom: 12,
-                }}>
-                  Quick Actions
-                </Text>
-                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
-                  {quickTools.map((tool, idx) => (
-                    <TouchableOpacity
-                      key={idx}
-                      onPress={tool.onPress}
-                      style={{
-                        width: (SCREEN_W - 46) / 2,
-                        backgroundColor: tool.bg,
-                        borderColor: tool.border || 'transparent',
-                        borderWidth: tool.border ? 1 : 0,
-                        borderRadius: 16,
-                        padding: 14,
-                        elevation: idx === 0 ? 4 : 0,
-                        shadowColor: primary, shadowOffset: { width: 0, height: 4 },
-                        shadowOpacity: idx === 0 ? 0.3 : 0, shadowRadius: 8,
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <View style={{ marginBottom: 10 }}>
-                        {tool.icon}
-                      </View>
-                      <Text style={{ fontSize: 14, fontWeight: '800', color: tool.textColor, marginBottom: 2 }}>
-                        {tool.title}
-                      </Text>
-                      <Text style={{
-                        fontSize: 10.5,
-                        color: idx === 0 ? 'rgba(255,255,255,0.85)' : rMuted,
-                        fontWeight: '500',
-                      }}>
-                        {tool.sub}
-                      </Text>
+                  {searchQuery.length > 0 && (
+                    <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <X size={16} color={rMuted} />
                     </TouchableOpacity>
-                  ))}
+                  )}
                 </View>
               </View>
-            )}
 
-            {/* Recent Files List */}
-            <View style={{ paddingHorizontal: 18 }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Clock size={15} color={rMuted} />
-                  <Text style={{ fontSize: 11, fontWeight: '800', color: rMuted, letterSpacing: 1.1, textTransform: 'uppercase' }}>
-                    {searchQuery ? `Search Results (${filteredFiles.length})` : `Recent Files (${recentFiles.length})`}
-                  </Text>
-                </View>
-                {!searchQuery && recentFiles.length > 0 && (
-                  <TouchableOpacity onPress={onClearRecent} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Text style={{ fontSize: 11, color: '#ef4444', fontWeight: '700' }}>Clear All</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-
-              {filteredFiles.length > 0 ? (
-                filteredFiles.map((f, idx) => (
-                  <View key={idx} style={{
-                    flexDirection: 'row', alignItems: 'center', gap: 10,
-                    backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
-                    borderColor: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)',
-                    borderWidth: 1, borderRadius: 14,
-                    padding: 12, marginBottom: 8,
+              {/* Brand Hero (when not searching) */}
+              {!searchQuery && (
+                <View style={{
+                  alignItems: 'center',
+                  paddingTop: 8,
+                  paddingBottom: 20,
+                  paddingHorizontal: 24,
+                }}>
+                  <View style={{
+                    width: 86, height: 86, borderRadius: 24,
+                    overflow: 'hidden',
+                    shadowColor: primary, shadowOffset: { width: 0, height: 8 },
+                    shadowOpacity: 0.35, shadowRadius: 16,
+                    elevation: 10, marginBottom: 10,
                   }}>
-                    {/* Acrobat-style Red PDF Badge */}
-                    <View style={{
-                      width: 42, height: 44, borderRadius: 10,
-                      backgroundColor: '#dc2626',
-                      alignItems: 'center', justifyContent: 'center',
-                    }}>
-                      <FileText size={18} color="#ffffff" />
-                      <Text style={{ fontSize: 8, fontWeight: '900', color: '#ffffff', marginTop: 1 }}>PDF</Text>
-                    </View>
-
-                    {/* File Title & Timestamp (Tap to Open) */}
-                    <TouchableOpacity
-                      style={{ flex: 1 }}
-                      onPress={() => onOpenRecent(f)}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={{ fontSize: 13, fontWeight: '700', color: rText }} numberOfLines={1}>
-                        {f.name}
-                      </Text>
-                      <Text style={{ fontSize: 10.5, color: rMuted, marginTop: 2, fontWeight: '500' }}>
-                        {new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-                      </Text>
-                    </TouchableOpacity>
-
-                    {/* Modern Action Buttons: Share, Open with other app, Delete */}
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                      {/* Share via WhatsApp, Mail, etc. */}
-                      <TouchableOpacity
-                        style={{ padding: 7, borderRadius: 8, backgroundColor: primary + '12' }}
-                        onPress={() => handleSharePdf(f)}
-                        activeOpacity={0.7}
-                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      >
-                        <Share2 size={15} color={primary} />
-                      </TouchableOpacity>
-
-                      {/* Open with other app (Adobe Acrobat, etc.) */}
-                      <TouchableOpacity
-                        style={{ padding: 7, borderRadius: 8, backgroundColor: '#0ea5e914' }}
-                        onPress={() => handleOpenWithOtherApp(f)}
-                        activeOpacity={0.7}
-                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      >
-                        <ExternalLink size={15} color="#0ea5e9" />
-                      </TouchableOpacity>
-
-                      {/* Remove from recents */}
-                      <TouchableOpacity
-                        style={{ padding: 7, borderRadius: 8, backgroundColor: '#ef444412' }}
-                        onPress={() => onRemoveRecent(f)}
-                        activeOpacity={0.7}
-                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      >
-                        <Trash2 size={15} color="#ef4444" />
-                      </TouchableOpacity>
-                    </View>
+                    <Image
+                      source={isDark ? appIconDark : appIcon}
+                      style={{ width: 86, height: 86 }}
+                      resizeMode="cover"
+                    />
                   </View>
-                ))
-              ) : (
-                <View style={{ alignItems: 'center', paddingVertical: 32, opacity: 0.6 }}>
-                  <FileText size={36} color={rMuted} />
-                  <Text style={{ fontSize: 13.5, color: rMuted, marginTop: 10, fontWeight: '700' }}>
-                    {searchQuery ? 'No documents match your search' : 'No recent documents yet'}
+                  <Text style={{
+                    fontSize: 22, fontWeight: '900', color: rText,
+                    letterSpacing: -0.5, marginBottom: 4,
+                  }}>
+                    Helper PDF Reader
                   </Text>
-                  <Text style={{ fontSize: 11, color: rMuted, marginTop: 4 }}>
-                    {searchQuery ? 'Try another keyword' : 'Tap "Open PDF" or the + button to start reading'}
+                  <Text style={{
+                    fontSize: 12.5, color: rMuted, textAlign: 'center',
+                    lineHeight: 18, maxWidth: 300,
+                  }}>
+                    Scan, read, listen & search PDFs — device, scan or cloud.
                   </Text>
                 </View>
               )}
+
+              {/* Quick Actions (2x2 Grid) */}
+              {!searchQuery && (
+                <View style={{ paddingHorizontal: 18, marginBottom: 22 }}>
+                  <Text style={{
+                    fontSize: 11, fontWeight: '800', color: rMuted,
+                    letterSpacing: 1.1, textTransform: 'uppercase', marginBottom: 12,
+                  }}>
+                    Quick Actions
+                  </Text>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+                    {quickTools.map((tool, idx) => (
+                      <TouchableOpacity
+                        key={idx}
+                        onPress={tool.onPress}
+                        style={{
+                          width: (SCREEN_W - 46) / 2,
+                          backgroundColor: tool.bg,
+                          borderColor: tool.border || 'transparent',
+                          borderWidth: tool.border ? 1 : 0,
+                          borderRadius: 16,
+                          padding: 14,
+                          elevation: idx === 0 ? 4 : 0,
+                          shadowColor: primary, shadowOffset: { width: 0, height: 4 },
+                          shadowOpacity: idx === 0 ? 0.3 : 0, shadowRadius: 8,
+                        }}
+                        activeOpacity={0.8}
+                      >
+                        <View style={{ marginBottom: 10 }}>
+                          {tool.icon}
+                        </View>
+                        <Text style={{ fontSize: 14, fontWeight: '800', color: tool.textColor, marginBottom: 2 }}>
+                          {tool.title}
+                        </Text>
+                        <Text style={{
+                          fontSize: 10.5,
+                          color: idx === 0 ? 'rgba(255,255,255,0.85)' : rMuted,
+                          fontWeight: '500',
+                        }}>
+                          {tool.sub}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {/* Recent Files List */}
+              <View style={{ paddingHorizontal: 18 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Clock size={15} color={rMuted} />
+                    <Text style={{ fontSize: 11, fontWeight: '800', color: rMuted, letterSpacing: 1.1, textTransform: 'uppercase' }}>
+                      {searchQuery ? `Search Results (${filteredFiles.length})` : `Recent Files (${recentFiles.length})`}
+                    </Text>
+                  </View>
+                  {!searchQuery && recentFiles.length > 0 && (
+                    <TouchableOpacity onPress={onClearRecent} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Text style={{ fontSize: 11, color: '#ef4444', fontWeight: '700' }}>Clear All</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {filteredFiles.length > 0 ? (
+                  filteredFiles.map((f, idx) => (
+                    <View key={idx} style={{
+                      flexDirection: 'row', alignItems: 'center', gap: 10,
+                      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+                      borderColor: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)',
+                      borderWidth: 1, borderRadius: 14,
+                      padding: 12, marginBottom: 8,
+                    }}>
+                      <View style={{
+                        width: 42, height: 44, borderRadius: 10,
+                        backgroundColor: '#dc2626',
+                        alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <FileText size={18} color="#ffffff" />
+                        <Text style={{ fontSize: 8, fontWeight: '900', color: '#ffffff', marginTop: 1 }}>PDF</Text>
+                      </View>
+
+                      <TouchableOpacity
+                        style={{ flex: 1 }}
+                        onPress={() => onOpenRecent(f)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: rText }} numberOfLines={1}>
+                          {f.name}
+                        </Text>
+                        <Text style={{ fontSize: 10.5, color: rMuted, marginTop: 2, fontWeight: '500' }}>
+                          {new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                        <TouchableOpacity
+                          style={{ padding: 7, borderRadius: 8, backgroundColor: primary + '12' }}
+                          onPress={() => handleSharePdf(f)}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <Share2 size={15} color={primary} />
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={{ padding: 7, borderRadius: 8, backgroundColor: '#0ea5e914' }}
+                          onPress={() => handleOpenWithOtherApp(f)}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <ExternalLink size={15} color="#0ea5e9" />
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={{ padding: 7, borderRadius: 8, backgroundColor: '#ef444412' }}
+                          onPress={() => onRemoveRecent(f)}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <Trash2 size={15} color="#ef4444" />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))
+                ) : (
+                  <View style={{ alignItems: 'center', paddingVertical: 32, opacity: 0.6 }}>
+                    <FileText size={36} color={rMuted} />
+                    <Text style={{ fontSize: 13.5, color: rMuted, marginTop: 10, fontWeight: '700' }}>
+                      {searchQuery ? 'No documents match your search' : 'No recent documents yet'}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: rMuted, marginTop: 4 }}>
+                      {searchQuery ? 'Try another keyword' : 'Tap "Scan Document" or "Open PDF" to get started'}
+                    </Text>
+                  </View>
+                )}
+              </View>
             </View>
-          </View>
-        )}
+          )}
 
-        {/* 2. FILES TAB (Storage Locations & All Documents) */}
-        {navTab === 'files' && (
-          <View style={{ paddingHorizontal: 18 }}>
-            <Text style={{
-              fontSize: 11, fontWeight: '800', color: rMuted,
-              letterSpacing: 1.1, textTransform: 'uppercase', marginBottom: 12,
-            }}>
-              Storage Locations
-            </Text>
+          {/* ═══════════════════════════════════════════════════════
+              TAB 2: FILES
+             ═══════════════════════════════════════════════════════ */}
+          {navTab === 'files' && (
+            <View style={{ paddingHorizontal: 18 }}>
+              <Text style={{
+                fontSize: 11, fontWeight: '800', color: rMuted,
+                letterSpacing: 1.1, textTransform: 'uppercase', marginBottom: 12,
+              }}>
+                Storage Locations
+              </Text>
 
-            {/* Storage Cards */}
-            <TouchableOpacity
-              onPress={onPick}
-              style={{
-                flexDirection: 'row', alignItems: 'center', gap: 14,
-                backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
-                borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
-                borderWidth: 1, borderRadius: 14, padding: 14, marginBottom: 10,
-              }}
-              activeOpacity={0.75}
-            >
-              <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: primary + '18', alignItems: 'center', justifyContent: 'center' }}>
-                <FolderOpen size={22} color={primary} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>On This Device</Text>
-                <Text style={{ fontSize: 11, color: rMuted, marginTop: 2 }}>Browse local storage, Downloads & PDFs</Text>
-              </View>
-              <ExternalLink size={16} color={rMuted} />
-            </TouchableOpacity>
-
-            {onOpenDrive && (
+              {/* On This Device */}
               <TouchableOpacity
-                onPress={onOpenDrive}
+                onPress={onPick}
                 style={{
                   flexDirection: 'row', alignItems: 'center', gap: 14,
                   backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
                   borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
-                  borderWidth: 1, borderRadius: 14, padding: 14, marginBottom: 18,
+                  borderWidth: 1, borderRadius: 14, padding: 14, marginBottom: 10,
                 }}
                 activeOpacity={0.75}
               >
-                <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: '#0ea5e918', alignItems: 'center', justifyContent: 'center' }}>
-                  <HardDrive size={22} color="#0ea5e9" />
+                <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: primary + '18', alignItems: 'center', justifyContent: 'center' }}>
+                  <FolderOpen size={22} color={primary} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>Google Drive</Text>
-                  <Text style={{ fontSize: 11, color: rMuted, marginTop: 2 }}>Access and stream cloud folders</Text>
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>On This Device</Text>
+                  <Text style={{ fontSize: 11, color: rMuted, marginTop: 2 }}>Browse local files, Downloads & storage</Text>
                 </View>
                 <ExternalLink size={16} color={rMuted} />
               </TouchableOpacity>
-            )}
 
-            {/* Document List */}
-            <Text style={{
-              fontSize: 11, fontWeight: '800', color: rMuted,
-              letterSpacing: 1.1, textTransform: 'uppercase', marginBottom: 12,
-            }}>
-              Available Documents ({filteredFiles.length})
-            </Text>
-
-            {filteredFiles.map((f, idx) => (
-              <View key={idx} style={{
-                flexDirection: 'row', alignItems: 'center', gap: 10,
-                backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
-                borderColor: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)',
-                borderWidth: 1, borderRadius: 14, padding: 12, marginBottom: 8,
-              }}>
-                <View style={{
-                  width: 40, height: 40, borderRadius: 10,
-                  backgroundColor: '#dc2626', alignItems: 'center', justifyContent: 'center',
-                }}>
-                  <FileText size={17} color="#ffffff" />
-                </View>
-                <TouchableOpacity style={{ flex: 1 }} onPress={() => onOpenRecent(f)} activeOpacity={0.7}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: rText }} numberOfLines={1}>{f.name}</Text>
-                  <Text style={{ fontSize: 10.5, color: rMuted, marginTop: 2, fontWeight: '500' }}>
-                    {new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-                  </Text>
-                </TouchableOpacity>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                  <TouchableOpacity
-                    style={{ padding: 7, borderRadius: 8, backgroundColor: primary + '12' }}
-                    onPress={() => handleSharePdf(f)}
-                  >
-                    <Share2 size={15} color={primary} />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={{ padding: 7, borderRadius: 8, backgroundColor: '#0ea5e914' }}
-                    onPress={() => handleOpenWithOtherApp(f)}
-                  >
-                    <ExternalLink size={15} color="#0ea5e9" />
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* 3. TOOLS TAB (Acrobat-like features directory) */}
-        {navTab === 'tools' && (
-          <View style={{ paddingHorizontal: 18 }}>
-            <Text style={{
-              fontSize: 11, fontWeight: '800', color: rMuted,
-              letterSpacing: 1.1, textTransform: 'uppercase', marginBottom: 12,
-            }}>
-              PDF Reader Features & Tools
-            </Text>
-
-            <View style={{ gap: 10 }}>
-              {toolsList.map((tool, idx) => (
-                <View
-                  key={idx}
+              {/* Google Drive */}
+              {onOpenDrive && (
+                <TouchableOpacity
+                  onPress={onOpenDrive}
                   style={{
-                    flexDirection: 'row', alignItems: 'flex-start', gap: 14,
+                    flexDirection: 'row', alignItems: 'center', gap: 14,
                     backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
                     borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
-                    borderWidth: 1, borderRadius: 14, padding: 14,
+                    borderWidth: 1, borderRadius: 14, padding: 14, marginBottom: 10,
                   }}
+                  activeOpacity={0.75}
                 >
-                  <View style={{
-                    width: 42, height: 42, borderRadius: 12,
-                    backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
-                    alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    {tool.icon}
+                  <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: '#0ea5e918', alignItems: 'center', justifyContent: 'center' }}>
+                    <HardDrive size={22} color="#0ea5e9" />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 13.5, fontWeight: '800', color: rText, marginBottom: 2 }}>
-                      {tool.title}
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>Google Drive</Text>
+                    <Text style={{ fontSize: 11, color: rMuted, marginTop: 2 }}>Browse and stream cloud folders</Text>
+                  </View>
+                  <ExternalLink size={16} color={rMuted} />
+                </TouchableOpacity>
+              )}
+
+              {/* Document List */}
+              <Text style={{
+                fontSize: 11, fontWeight: '800', color: rMuted,
+                letterSpacing: 1.1, textTransform: 'uppercase', marginTop: 12, marginBottom: 12,
+              }}>
+                All Documents ({filteredFiles.length})
+              </Text>
+
+              {filteredFiles.map((f, idx) => (
+                <View key={idx} style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 10,
+                  backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+                  borderColor: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)',
+                  borderWidth: 1, borderRadius: 14, padding: 12, marginBottom: 8,
+                }}>
+                  <View style={{
+                    width: 40, height: 40, borderRadius: 10,
+                    backgroundColor: '#dc2626', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <FileText size={17} color="#ffffff" />
+                  </View>
+                  <TouchableOpacity style={{ flex: 1 }} onPress={() => onOpenRecent(f)} activeOpacity={0.7}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: rText }} numberOfLines={1}>{f.name}</Text>
+                    <Text style={{ fontSize: 10.5, color: rMuted, marginTop: 2, fontWeight: '500' }}>
+                      {new Date(f.openedAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                     </Text>
-                    <Text style={{ fontSize: 11, color: rMuted, lineHeight: 16 }}>
-                      {tool.desc}
-                    </Text>
+                  </TouchableOpacity>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    <TouchableOpacity
+                      style={{ padding: 7, borderRadius: 8, backgroundColor: primary + '12' }}
+                      onPress={() => handleSharePdf(f)}
+                    >
+                      <Share2 size={15} color={primary} />
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={{ padding: 7, borderRadius: 8, backgroundColor: '#0ea5e914' }}
+                      onPress={() => handleOpenWithOtherApp(f)}
+                    >
+                      <ExternalLink size={15} color="#0ea5e9" />
+                    </TouchableOpacity>
                   </View>
                 </View>
               ))}
             </View>
-          </View>
-        )}
-      </ScrollView>
+          )}
 
-      {/* ── Acrobat Floating Action Button (+) ─────────────── */}
-      <TouchableOpacity
-        onPress={onPick}
-        style={{
-          position: 'absolute',
-          bottom: 24,
-          right: 20,
-          width: 58,
-          height: 58,
-          borderRadius: 29,
-          backgroundColor: primary,
-          alignItems: 'center',
-          justifyContent: 'center',
-          shadowColor: primary,
-          shadowOffset: { width: 0, height: 6 },
-          shadowOpacity: 0.45,
-          shadowRadius: 10,
-          elevation: 8,
-        }}
-        activeOpacity={0.85}
+          {/* ═══════════════════════════════════════════════════════
+              TAB 3: SCAN (CLEAR SCANNER STYLE)
+             ═══════════════════════════════════════════════════════ */}
+          {navTab === 'scan' && (
+            <View style={{ paddingHorizontal: 18 }}>
+              {scannedPages.length === 0 ? (
+                /* Scanner Empty State / Launchpad */
+                <View style={{ alignItems: 'center', paddingVertical: 24 }}>
+                  <View style={{
+                    width: 90, height: 90, borderRadius: 28,
+                    backgroundColor: primary + '15',
+                    borderColor: primary + '35', borderWidth: 1.5,
+                    alignItems: 'center', justifyContent: 'center',
+                    marginBottom: 16,
+                  }}>
+                    <ScanLine size={44} color={primary} />
+                  </View>
+
+                  <Text style={{ fontSize: 22, fontWeight: '900', color: rText, letterSpacing: -0.4, marginBottom: 6 }}>
+                    Clear Document Scanner
+                  </Text>
+                  <Text style={{ fontSize: 13, color: rMuted, textAlign: 'center', lineHeight: 19, maxWidth: 320, marginBottom: 28 }}>
+                    Capture high-clarity document scans with automatic background cleaning, contrast enhancement, and multi-page PDF export.
+                  </Text>
+
+                  {/* Primary Scan Button (Camera) */}
+                  <TouchableOpacity
+                    onPress={handleScanWithCamera}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+                      width: '100%', paddingVertical: 16, borderRadius: 16,
+                      backgroundColor: primary,
+                      shadowColor: primary, shadowOffset: { width: 0, height: 6 },
+                      shadowOpacity: 0.35, shadowRadius: 10, elevation: 6,
+                      marginBottom: 12,
+                    }}
+                    activeOpacity={0.82}
+                  >
+                    <Camera size={22} color="#ffffff" />
+                    <Text style={{ fontSize: 15, fontWeight: '800', color: '#ffffff' }}>
+                      Scan with Camera
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Secondary Import Button (Gallery / Photos) */}
+                  <TouchableOpacity
+                    onPress={handleImportPhotosToScan}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
+                      width: '100%', paddingVertical: 15, borderRadius: 16,
+                      backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                      borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+                      borderWidth: 1,
+                    }}
+                    activeOpacity={0.75}
+                  >
+                    <FolderOpen size={20} color={rText} />
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: rText }}>
+                      Import from Photos / Gallery
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Clear Scanner Feature Badges */}
+                  <View style={{ marginTop: 32, width: '100%', gap: 10 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 12, backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
+                      <Wand2 size={18} color="#8b5cf6" />
+                      <Text style={{ fontSize: 12.5, color: rText, fontWeight: '600' }}>Clear Scan text contrast & white background filter</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 12, backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
+                      <FilePlus size={18} color="#059669" />
+                      <Text style={{ fontSize: 12.5, color: rText, fontWeight: '600' }}>Multi-page batch scanning into single PDF</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 12, backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
+                      <RotateCw size={18} color="#0ea5e9" />
+                      <Text style={{ fontSize: 12.5, color: rText, fontWeight: '600' }}>Rotate & adjust pages before saving</Text>
+                    </View>
+                  </View>
+                </View>
+              ) : (
+                /* Scanner Active Review & Filter Studio */
+                <View>
+                  {/* Studio Header: Document Title & Done Button */}
+                  <View style={{
+                    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                    marginBottom: 12, gap: 10,
+                  }}>
+                    <View style={{ flex: 1 }}>
+                      <TextInput
+                        style={{
+                          fontSize: 15, fontWeight: '800', color: rText,
+                          backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                          borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+                          borderWidth: 1, borderRadius: 10,
+                          paddingHorizontal: 12, paddingVertical: 8,
+                        }}
+                        placeholder="Document Name (e.g. Scan_Report)"
+                        placeholderTextColor={rMuted}
+                        value={scanDocTitle}
+                        onChangeText={setScanDocTitle}
+                      />
+                    </View>
+
+                    <TouchableOpacity
+                      onPress={handleCompileScannedPdf}
+                      disabled={isGeneratingPdf}
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 6,
+                        backgroundColor: primary, paddingHorizontal: 16, paddingVertical: 10,
+                        borderRadius: 12, elevation: 4,
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      {isGeneratingPdf ? (
+                        <ActivityIndicator size="small" color="#ffffff" />
+                      ) : (
+                        <>
+                          <Check size={16} color="#ffffff" strokeWidth={3} />
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: '#ffffff' }}>
+                            Save PDF ({scannedPages.length})
+                          </Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Main Page Preview Area */}
+                  {currentPage && (
+                    <View style={{
+                      height: 330,
+                      borderRadius: 18,
+                      overflow: 'hidden',
+                      backgroundColor: '#000000',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginBottom: 14,
+                      borderColor: primary + '30', borderWidth: 1,
+                    }}>
+                      <Image
+                        source={{ uri: currentPage.uri }}
+                        style={{
+                          width: '94%',
+                          height: '94%',
+                          transform: [{ rotate: `${currentPage.rotation}deg` }],
+                        }}
+                        resizeMode="contain"
+                      />
+
+                      {/* Page Counter Badge */}
+                      <View style={{
+                        position: 'absolute', top: 12, right: 12,
+                        backgroundColor: 'rgba(0,0,0,0.7)',
+                        paddingHorizontal: 10, paddingVertical: 4,
+                        borderRadius: 12,
+                      }}>
+                        <Text style={{ color: '#ffffff', fontSize: 11, fontWeight: '800' }}>
+                          {selectedPageIndex + 1} / {scannedPages.length}
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+
+                  {/* Clear Scanner Filter Chips */}
+                  <View style={{ marginBottom: 14 }}>
+                    <Text style={{ fontSize: 11, fontWeight: '800', color: rMuted, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 }}>
+                      Clear Scanner Filter
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 6 }}>
+                      {[
+                        { key: 'doc',   label: 'Clear Scan', desc: 'Crisp Doc' },
+                        { key: 'color', label: 'Magic Color', desc: 'Vibrant' },
+                        { key: 'bw',    label: 'B & W',      desc: 'Clean B&W' },
+                        { key: 'orig',  label: 'Original',   desc: 'Natural' },
+                      ].map(f => {
+                        const active = scanFilter === f.key;
+                        return (
+                          <TouchableOpacity
+                            key={f.key}
+                            onPress={() => handleApplyFilter(f.key as any)}
+                            style={{
+                              flex: 1, alignItems: 'center',
+                              paddingVertical: 8, paddingHorizontal: 4,
+                              borderRadius: 10,
+                              backgroundColor: active ? primary : (isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'),
+                              borderWidth: 1,
+                              borderColor: active ? primary : (isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'),
+                            }}
+                            activeOpacity={0.7}
+                          >
+                            <Text style={{ fontSize: 11.5, fontWeight: '800', color: active ? '#ffffff' : rText }}>
+                              {f.label}
+                            </Text>
+                            <Text style={{ fontSize: 9.5, color: active ? 'rgba(255,255,255,0.8)' : rMuted, marginTop: 1 }}>
+                              {f.desc}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  {/* Page Controls Bar (Rotate, Delete, Add) */}
+                  <View style={{
+                    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
+                    padding: 8, borderRadius: 14, marginBottom: 14,
+                  }}>
+                    <TouchableOpacity
+                      onPress={() => handleRotatePage(selectedPageIndex)}
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8 }}
+                      activeOpacity={0.7}
+                    >
+                      <RotateCw size={17} color={primary} />
+                      <Text style={{ fontSize: 12, fontWeight: '700', color: primary }}>Rotate 90°</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={() => handleDeletePage(selectedPageIndex)}
+                      style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8 }}
+                      activeOpacity={0.7}
+                    >
+                      <Trash2 size={17} color="#ef4444" />
+                      <Text style={{ fontSize: 12, fontWeight: '700', color: '#ef4444' }}>Delete Page</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={handleScanWithCamera}
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 6,
+                        backgroundColor: primary + '18', paddingHorizontal: 12, paddingVertical: 8,
+                        borderRadius: 10,
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Plus size={16} color={primary} strokeWidth={2.5} />
+                      <Text style={{ fontSize: 12, fontWeight: '800', color: primary }}>Add Page</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Horizontal Thumbnail Strip */}
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{ gap: 8, paddingBottom: 10 }}
+                  >
+                    {scannedPages.map((page, idx) => {
+                      const isSelected = idx === selectedPageIndex;
+                      return (
+                        <TouchableOpacity
+                          key={page.id}
+                          onPress={() => setSelectedPageIndex(idx)}
+                          style={{
+                            width: 60, height: 78, borderRadius: 10,
+                            overflow: 'hidden',
+                            borderColor: isSelected ? primary : 'rgba(128,128,128,0.25)',
+                            borderWidth: isSelected ? 2.5 : 1,
+                            backgroundColor: '#000000',
+                          }}
+                          activeOpacity={0.8}
+                        >
+                          <Image
+                            source={{ uri: page.uri }}
+                            style={{
+                              width: '100%', height: '100%',
+                              transform: [{ rotate: `${page.rotation}deg` }],
+                            }}
+                            resizeMode="cover"
+                          />
+                          <View style={{
+                            position: 'absolute', bottom: 2, left: 2,
+                            backgroundColor: 'rgba(0,0,0,0.65)',
+                            paddingHorizontal: 4, borderRadius: 4,
+                          }}>
+                            <Text style={{ color: '#ffffff', fontSize: 9, fontWeight: '800' }}>{idx + 1}</Text>
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
+
+                    {/* Quick Add Buttons in Strip */}
+                    <TouchableOpacity
+                      onPress={handleScanWithCamera}
+                      style={{
+                        width: 60, height: 78, borderRadius: 10,
+                        borderWidth: 1.5, borderStyle: 'dashed',
+                        borderColor: primary + '60',
+                        backgroundColor: primary + '10',
+                        alignItems: 'center', justifyContent: 'center', gap: 4,
+                      }}
+                      activeOpacity={0.75}
+                    >
+                      <Camera size={18} color={primary} />
+                      <Text style={{ fontSize: 9, fontWeight: '800', color: primary }}>Camera</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      onPress={handleImportPhotosToScan}
+                      style={{
+                        width: 60, height: 78, borderRadius: 10,
+                        borderWidth: 1.5, borderStyle: 'dashed',
+                        borderColor: primary + '60',
+                        backgroundColor: primary + '10',
+                        alignItems: 'center', justifyContent: 'center', gap: 4,
+                      }}
+                      activeOpacity={0.75}
+                    >
+                      <FolderOpen size={18} color={primary} />
+                      <Text style={{ fontSize: 9, fontWeight: '800', color: primary }}>Photos</Text>
+                    </TouchableOpacity>
+                  </ScrollView>
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════
+              TAB 4: TOOLS & CONVERTERS (ACROBAT TOOLS)
+             ═══════════════════════════════════════════════════════ */}
+          {navTab === 'tools' && (
+            <View style={{ paddingHorizontal: 18 }}>
+              {/* Converters Section */}
+              <Text style={{
+                fontSize: 11, fontWeight: '800', color: rMuted,
+                letterSpacing: 1.1, textTransform: 'uppercase', marginBottom: 12,
+              }}>
+                Document Converters
+              </Text>
+
+              <View style={{ gap: 10, marginBottom: 24 }}>
+                {/* 1. Clear Document Scanner */}
+                <TouchableOpacity
+                  onPress={() => setNavTab('scan')}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 14,
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+                    borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                    borderWidth: 1, borderRadius: 14, padding: 14,
+                  }}
+                  activeOpacity={0.75}
+                >
+                  <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: primary + '18', alignItems: 'center', justifyContent: 'center' }}>
+                    <ScanLine size={22} color={primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>Clear Document Scanner</Text>
+                    <Text style={{ fontSize: 11, color: rMuted, marginTop: 2 }}>Scan paper pages with contrast enhancement</Text>
+                  </View>
+                  <ChevronRight size={18} color={rMuted} />
+                </TouchableOpacity>
+
+                {/* 2. Images to PDF Converter */}
+                <TouchableOpacity
+                  onPress={handleImportPhotosToScan}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 14,
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+                    borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                    borderWidth: 1, borderRadius: 14, padding: 14,
+                  }}
+                  activeOpacity={0.75}
+                >
+                  <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: '#8b5cf618', alignItems: 'center', justifyContent: 'center' }}>
+                    <FilePlus size={22} color="#8b5cf6" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>Images to PDF</Text>
+                    <Text style={{ fontSize: 11, color: rMuted, marginTop: 2 }}>Batch combine gallery photos into a single PDF</Text>
+                  </View>
+                  <ChevronRight size={18} color={rMuted} />
+                </TouchableOpacity>
+
+                {/* 3. Text / Notes to PDF Converter */}
+                <TouchableOpacity
+                  onPress={() => setShowTextToPdfModal(true)}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 14,
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+                    borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                    borderWidth: 1, borderRadius: 14, padding: 14,
+                  }}
+                  activeOpacity={0.75}
+                >
+                  <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: '#05966918', alignItems: 'center', justifyContent: 'center' }}>
+                    <Type size={22} color="#059669" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>Text Notes to PDF</Text>
+                    <Text style={{ fontSize: 11, color: rMuted, marginTop: 2 }}>Format and export typed notes as PDF document</Text>
+                  </View>
+                  <ChevronRight size={18} color={rMuted} />
+                </TouchableOpacity>
+
+                {/* 4. Word (DOCX) to PDF */}
+                <TouchableOpacity
+                  onPress={onPick}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 14,
+                    backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+                    borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                    borderWidth: 1, borderRadius: 14, padding: 14,
+                  }}
+                  activeOpacity={0.75}
+                >
+                  <View style={{ width: 44, height: 44, borderRadius: 12, backgroundColor: '#f59e0b18', alignItems: 'center', justifyContent: 'center' }}>
+                    <BookOpen size={22} color="#f59e0b" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 14, fontWeight: '800', color: rText }}>Word (DOCX) Support</Text>
+                    <Text style={{ fontSize: 11, color: rMuted, marginTop: 2 }}>Open Microsoft Word files rendered as PDF</Text>
+                  </View>
+                  <ChevronRight size={18} color={rMuted} />
+                </TouchableOpacity>
+              </View>
+
+              {/* PDF Reading Features Section */}
+              <Text style={{
+                fontSize: 11, fontWeight: '800', color: rMuted,
+                letterSpacing: 1.1, textTransform: 'uppercase', marginBottom: 12,
+              }}>
+                Reading & Study Tools
+              </Text>
+
+              <View style={{ gap: 10 }}>
+                {[
+                  { icon: <Search size={22} color={primary} />, title: 'In-PDF Full Text Search', desc: 'Find keywords and quotes across all pages instantly' },
+                  { icon: <Volume2 size={22} color="#8b5cf6" />, title: 'Text to Speech (TTS)', desc: 'Listen to textbooks with customizable voice & speed' },
+                  { icon: <Bookmark size={22} color="#f59e0b" />, title: 'Bookmarks & Index', desc: 'Jump chapters and save your reading positions' },
+                  { icon: <ZoomIn size={22} color="#0ea5e9" />, title: 'Fluid Pinch-to-Zoom', desc: 'Multi-touch zoom and clean reading mode' },
+                  { icon: <Moon size={22} color="#6366f1" />, title: 'Eye-Care Themes', desc: 'White, Sepia paper, OLED Deep Dark & Night Forest' },
+                ].map((t, i) => (
+                  <View
+                    key={i}
+                    style={{
+                      flexDirection: 'row', alignItems: 'flex-start', gap: 14,
+                      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+                      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                      borderWidth: 1, borderRadius: 14, padding: 14,
+                    }}
+                  >
+                    <View style={{
+                      width: 42, height: 42, borderRadius: 12,
+                      backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                      alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      {t.icon}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13.5, fontWeight: '800', color: rText, marginBottom: 2 }}>
+                        {t.title}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: rMuted, lineHeight: 16 }}>
+                        {t.desc}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+        </ScrollView>
+      </View>
+
+      {/* ── Fixed Bottom Navigation Bar (Adobe Acrobat Style) ── */}
+      <View style={{
+        position: 'absolute',
+        bottom: 0,
+        left: 0,
+        right: 0,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-around',
+        backgroundColor: isDark ? '#111217' : '#ffffff',
+        borderTopWidth: 1,
+        borderTopColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)',
+        paddingTop: 8,
+        paddingBottom: Math.max(bottomInset, 8),
+        elevation: 20,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -3 },
+        shadowOpacity: isDark ? 0.35 : 0.08,
+        shadowRadius: 8,
+      }}>
+        {/* 1. Home */}
+        <TouchableOpacity
+          onPress={() => setNavTab('home')}
+          style={{ alignItems: 'center', justifyContent: 'center', width: 68 }}
+          activeOpacity={0.7}
+        >
+          <Home size={22} color={navTab === 'home' ? primary : rMuted} />
+          <Text style={{
+            fontSize: 11,
+            fontWeight: navTab === 'home' ? '800' : '600',
+            color: navTab === 'home' ? primary : rMuted,
+            marginTop: 3,
+          }}>
+            Home
+          </Text>
+        </TouchableOpacity>
+
+        {/* 2. Files */}
+        <TouchableOpacity
+          onPress={() => setNavTab('files')}
+          style={{ alignItems: 'center', justifyContent: 'center', width: 68 }}
+          activeOpacity={0.7}
+        >
+          <FolderOpen size={22} color={navTab === 'files' ? primary : rMuted} />
+          <Text style={{
+            fontSize: 11,
+            fontWeight: navTab === 'files' ? '800' : '600',
+            color: navTab === 'files' ? primary : rMuted,
+            marginTop: 3,
+          }}>
+            Files
+          </Text>
+        </TouchableOpacity>
+
+        {/* 3. Scan (Clear Scanner Highlighted Button) */}
+        <TouchableOpacity
+          onPress={() => setNavTab('scan')}
+          style={{ alignItems: 'center', justifyContent: 'center', width: 72 }}
+          activeOpacity={0.8}
+        >
+          <View style={{
+            width: 48, height: 48, borderRadius: 24,
+            backgroundColor: navTab === 'scan' ? primary : (primary + '22'),
+            alignItems: 'center', justifyContent: 'center',
+            marginTop: -16,
+            shadowColor: primary, shadowOffset: { width: 0, height: 4 },
+            shadowOpacity: 0.45, shadowRadius: 8, elevation: 6,
+          }}>
+            <ScanLine size={24} color={navTab === 'scan' ? '#ffffff' : primary} />
+          </View>
+          <Text style={{
+            fontSize: 11,
+            fontWeight: navTab === 'scan' ? '800' : '600',
+            color: navTab === 'scan' ? primary : rMuted,
+            marginTop: 3,
+          }}>
+            Scan
+          </Text>
+        </TouchableOpacity>
+
+        {/* 4. Tools & Converters */}
+        <TouchableOpacity
+          onPress={() => setNavTab('tools')}
+          style={{ alignItems: 'center', justifyContent: 'center', width: 68 }}
+          activeOpacity={0.7}
+        >
+          <Wrench size={22} color={navTab === 'tools' ? primary : rMuted} />
+          <Text style={{
+            fontSize: 11,
+            fontWeight: navTab === 'tools' ? '800' : '600',
+            color: navTab === 'tools' ? primary : rMuted,
+            marginTop: 3,
+          }}>
+            Tools
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* ── Text to PDF Modal ──────────────────────────────── */}
+      <Modal
+        visible={showTextToPdfModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowTextToPdfModal(false)}
       >
-        <Plus size={26} color="#ffffff" strokeWidth={2.8} />
-      </TouchableOpacity>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={{
+            flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+            justifyContent: 'flex-end',
+          }}
+        >
+          <View style={{
+            backgroundColor: isDark ? '#18181b' : '#ffffff',
+            borderTopLeftRadius: 24, borderTopRightRadius: 24,
+            padding: 20, maxHeight: '85%',
+          }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Type size={20} color={primary} />
+                <Text style={{ fontSize: 16, fontWeight: '800', color: rText }}>Text Notes to PDF</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowTextToPdfModal(false)}>
+                <X size={20} color={rMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <TextInput
+              style={{
+                fontSize: 15, fontWeight: '700', color: rText,
+                backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+                borderWidth: 1, borderRadius: 12,
+                paddingHorizontal: 14, paddingVertical: 10,
+                marginBottom: 12,
+              }}
+              placeholder="Document Title (e.g. Study Notes)"
+              placeholderTextColor={rMuted}
+              value={textDocTitle}
+              onChangeText={setTextDocTitle}
+            />
+
+            <TextInput
+              style={{
+                fontSize: 14, color: rText,
+                backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                borderColor: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+                borderWidth: 1, borderRadius: 12,
+                paddingHorizontal: 14, paddingVertical: 12,
+                height: 180, textAlignVertical: 'top',
+                marginBottom: 16,
+              }}
+              placeholder="Type or paste your notes, essay, or text here..."
+              placeholderTextColor={rMuted}
+              value={textDocBody}
+              onChangeText={setTextDocBody}
+              multiline
+            />
+
+            <TouchableOpacity
+              onPress={handleConvertTextToPdf}
+              disabled={isConvertingText}
+              style={{
+                flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+                backgroundColor: primary, paddingVertical: 15, borderRadius: 14,
+              }}
+              activeOpacity={0.82}
+            >
+              {isConvertingText ? (
+                <ActivityIndicator size="small" color="#ffffff" />
+              ) : (
+                <>
+                  <FilePlus size={18} color="#ffffff" />
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: '#ffffff' }}>Create & Open PDF</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
