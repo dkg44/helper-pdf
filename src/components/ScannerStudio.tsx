@@ -84,6 +84,7 @@ import {
   loadScannerFolders,
   createScannerFolder,
   deleteScannerFolder,
+  renameScannerFolder,
   loadSavedScanDocs,
   addSavedScanDoc,
   deleteSavedScanDoc,
@@ -155,6 +156,12 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   const [renameText, setRenameText] = useState('');
   const [showDetailDotsMenu, setShowDetailDotsMenu] = useState(false);
 
+  // 3-dots menus & modals for folders
+  const [activeMenuFolder, setActiveMenuFolder] = useState<ScannedFolder | null>(null);
+  const [showFolderMenuModal, setShowFolderMenuModal] = useState(false);
+  const [showRenameFolderModal, setShowRenameFolderModal] = useState(false);
+  const [renameFolderText, setRenameFolderText] = useState('');
+
   // Layout size for draggable crop canvas
   const [cropLayout, setCropLayout] = useState({ width: SCREEN_W - 32, height: SCREEN_H * 0.58 });
 
@@ -195,8 +202,14 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
   // Filtered & sorted documents
   const displayedDocs = useMemo(() => {
     let result = savedDocs.filter((d) => {
-      const matchesFolder = selectedFolderId === null || d.folderId === selectedFolderId;
       const matchesSearch = !searchQuery.trim() || d.title.toLowerCase().includes(searchQuery.toLowerCase());
+      if (searchQuery.trim()) {
+        return matchesSearch;
+      }
+      // If outside of folder (All Scans / Root), do NOT show documents that belong to any folder
+      const matchesFolder = selectedFolderId === null 
+        ? (!d.folderId) // only unfiled/root documents
+        : d.folderId === selectedFolderId;
       return matchesFolder && matchesSearch;
     });
 
@@ -646,6 +659,51 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
     }
   };
 
+  const handleOpenFolderMenu = (folder: ScannedFolder) => {
+    setActiveMenuFolder(folder);
+    setShowFolderMenuModal(true);
+  };
+
+  const handleStartRenameFolder = () => {
+    if (!activeMenuFolder) return;
+    setRenameFolderText(activeMenuFolder.name);
+    setShowFolderMenuModal(false);
+    setTimeout(() => {
+      setShowRenameFolderModal(true);
+    }, 200);
+  };
+
+  const handleExecuteRenameFolder = async () => {
+    if (!activeMenuFolder || !renameFolderText.trim()) return;
+    await renameScannerFolder(activeMenuFolder.id, renameFolderText.trim());
+    await loadFoldersAndDocs();
+    setShowRenameFolderModal(false);
+    setActiveMenuFolder(null);
+  };
+
+  const handleExecuteDeleteFolder = (folder: ScannedFolder) => {
+    setShowFolderMenuModal(false);
+    Alert.alert(
+      'Delete Folder',
+      `Are you sure you want to delete "${folder.name}"? Documents inside will not be deleted; they will be moved to All Scans.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            if (selectedFolderId === folder.id) {
+              setSelectedFolderId(null);
+            }
+            await deleteScannerFolder(folder.id);
+            await loadFoldersAndDocs();
+            setActiveMenuFolder(null);
+          },
+        },
+      ]
+    );
+  };
+
   // ── Base64 Preview Generator for 100% Reliable WebView Rendering ────
   const [filterPreviewBase64, setFilterPreviewBase64] = useState<string>('');
 
@@ -872,16 +930,39 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
           <ScrollView contentContainerStyle={styles.docListScroll} showsVerticalScrollIndicator={false}>
             {/* Back Banner when inside a Folder */}
             {selectedFolderId !== null && (
-              <TouchableOpacity
-                onPress={() => setSelectedFolderId(null)}
-                style={[styles.folderBackBanner, { backgroundColor: primaryColor + '12', borderColor: primaryColor + '30' }]}
-                activeOpacity={0.7}
+              <View
+                style={[
+                  styles.folderBackBanner,
+                  { backgroundColor: primaryColor + '12', borderColor: primaryColor + '30', justifyContent: 'space-between' },
+                ]}
               >
-                <ChevronLeft size={16} color={primaryColor} />
-                <Text style={{ fontSize: 13, fontWeight: '700', color: primaryColor }}>
-                  Back to All Scans
-                </Text>
-              </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setSelectedFolderId(null)}
+                  style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}
+                  activeOpacity={0.7}
+                >
+                  <ChevronLeft size={16} color={primaryColor} />
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: primaryColor, marginLeft: 4 }}>
+                    Back to All Scans
+                  </Text>
+                  {folders.find((f) => f.id === selectedFolderId) && (
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: textColor, marginLeft: 8 }} numberOfLines={1}>
+                      • {folders.find((f) => f.id === selectedFolderId)?.name}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+
+                {folders.find((f) => f.id === selectedFolderId) && (
+                  <TouchableOpacity
+                    onPress={() => handleOpenFolderMenu(folders.find((f) => f.id === selectedFolderId)!)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    style={{ padding: 4 }}
+                    activeOpacity={0.7}
+                  >
+                    <MoreVertical size={18} color={primaryColor} />
+                  </TouchableOpacity>
+                )}
+              </View>
             )}
 
             {/* ── FOLDERS IN GRID VIEW ── */}
@@ -898,8 +979,21 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                         style={[styles.gridCard, styles.gridFolderCard, { backgroundColor: cardBg, borderColor: border }]}
                         activeOpacity={0.75}
                       >
-                        <View style={[styles.folderIconBox, { backgroundColor: '#f59e0b16' }]}>
-                          <Folder size={26} color="#f59e0b" />
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                          <View style={[styles.folderIconBox, { backgroundColor: '#f59e0b16' }]}>
+                            <Folder size={24} color="#f59e0b" />
+                          </View>
+                          <TouchableOpacity
+                            onPress={(e) => {
+                              e.stopPropagation?.();
+                              handleOpenFolderMenu(f);
+                            }}
+                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                            style={{ padding: 6, borderRadius: 10 }}
+                            activeOpacity={0.6}
+                          >
+                            <MoreVertical size={18} color={mutedColor} />
+                          </TouchableOpacity>
                         </View>
                         <View style={{ marginTop: 8 }}>
                           <Text style={[styles.gridTitle, { color: textColor }]} numberOfLines={1}>
@@ -940,6 +1034,17 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
                           {docCount} {docCount === 1 ? 'document' : 'documents'}
                         </Text>
                       </View>
+                      <TouchableOpacity
+                        onPress={(e) => {
+                          e.stopPropagation?.();
+                          handleOpenFolderMenu(f);
+                        }}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        style={{ padding: 8, marginRight: 2 }}
+                        activeOpacity={0.6}
+                      >
+                        <MoreVertical size={18} color={mutedColor} />
+                      </TouchableOpacity>
                       <ChevronRight size={18} color={mutedColor} />
                     </TouchableOpacity>
                   );
@@ -1524,6 +1629,91 @@ export const ScannerStudio: React.FC<ScannerStudioProps> = ({
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
+      </Modal>
+
+      {/* ── Folder Item 3-Dots Menu ── */}
+      <Modal
+        visible={showFolderMenuModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowFolderMenuModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowFolderMenuModal(false)}
+        >
+          <View style={[styles.actionSheet, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
+            <View style={styles.sheetHandle} />
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+              <View style={[styles.folderIconBoxList, { backgroundColor: '#f59e0b16', width: 36, height: 36, marginRight: 10 }]}>
+                <Folder size={18} color="#f59e0b" />
+              </View>
+              <Text style={[styles.sheetTitle, { color: textColor, marginBottom: 0, flex: 1 }]} numberOfLines={1}>
+                {activeMenuFolder?.name || 'Folder Options'}
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.sheetOption}
+              onPress={handleStartRenameFolder}
+            >
+              <Edit3 size={18} color="#2563eb" />
+              <Text style={[styles.sheetOptionText, { color: textColor }]}>Rename Folder</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.sheetOption, { borderTopWidth: 1, borderTopColor: border, marginTop: 4 }]}
+              onPress={() => {
+                if (activeMenuFolder) {
+                  handleExecuteDeleteFolder(activeMenuFolder);
+                }
+              }}
+            >
+              <Trash2 size={18} color="#ef4444" />
+              <Text style={[styles.sheetOptionText, { color: '#ef4444' }]}>Delete Folder</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ── Modal: Rename Folder ── */}
+      <Modal
+        visible={showRenameFolderModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowRenameFolderModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.dialogBox, { backgroundColor: isDark ? '#1e293b' : '#ffffff' }]}>
+            <Text style={[styles.dialogTitle, { color: textColor }]}>Rename Folder</Text>
+            <TextInput
+              value={renameFolderText}
+              onChangeText={setRenameFolderText}
+              placeholder="Folder name..."
+              placeholderTextColor={mutedColor}
+              style={[
+                styles.dialogInput,
+                { color: textColor, borderColor: border, backgroundColor: isDark ? '#0f172a' : '#f8fafc' },
+              ]}
+              autoFocus
+            />
+            <View style={styles.dialogButtons}>
+              <TouchableOpacity
+                onPress={() => setShowRenameFolderModal(false)}
+                style={[styles.dialogBtn, { borderColor: border, borderWidth: 1 }]}
+              >
+                <Text style={{ color: mutedColor, fontWeight: '600' }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleExecuteRenameFolder}
+                style={[styles.dialogBtn, { backgroundColor: primaryColor }]}
+              >
+                <Text style={{ color: '#ffffff', fontWeight: '700' }}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
       </Modal>
 
       {/* ── Modal: Create New Folder ── */}
@@ -2656,7 +2846,8 @@ const styles = StyleSheet.create({
   },
   gridFolderCard: {
     padding: 12,
-    justifyContent: 'center',
+    minHeight: 110,
+    justifyContent: 'space-between',
   },
   folderIconBox: {
     width: 48,

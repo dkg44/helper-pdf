@@ -395,6 +395,14 @@ export const deleteScannerFolder = async (folderId: string): Promise<void> => {
   await saveScanDocs(updatedDocs);
 };
 
+export const renameScannerFolder = async (folderId: string, newName: string): Promise<void> => {
+  const folders = await loadScannerFolders();
+  const trimmed = newName.trim();
+  if (!trimmed) return;
+  const updatedFolders = folders.map((f) => (f.id === folderId ? { ...f, name: trimmed } : f));
+  await saveScannerFolders(updatedFolders);
+};
+
 // ── DOCUMENT PERSISTENCE ────────────────────────────────────────
 
 export const loadSavedScanDocs = async (): Promise<SavedScanDoc[]> => {
