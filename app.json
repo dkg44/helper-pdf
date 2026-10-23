@@ -7,10 +7,6 @@
     "orientation": "default",
     "icon": "./src/assets/icon.png",
     "userInterfaceStyle": "automatic",
-    "androidStatusBar": {
-      "barStyle": "dark-content",
-      "translucent": true
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.dkwork.helperpdf",
@@ -91,6 +87,12 @@
       ],
       "expo-sharing",
       "expo-status-bar"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "31024e26-0a1e-4078-9a03-4536935b9a5c"
+      }
+    },
+    "owner": "upschelper"
   }
 }
