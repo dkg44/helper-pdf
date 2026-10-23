@@ -68,11 +68,6 @@
     "web": {
       "favicon": "./src/assets/icon.png"
     },
-    "extra": {
-      "eas": {
-        "projectId": "helper-pdf-reader"
-      }
-    },
     "plugins": [
       [
         "@react-native-google-signin/google-signin",
